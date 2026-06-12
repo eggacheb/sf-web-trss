@@ -110,11 +110,28 @@ function normalizeImagePayload(image) {
   if (typeof image !== 'string') return null
 
   const raw = image.replace(/^data:image\/[\w.+-]+;base64,/i, '').replace(/\s+/g, '')
-  if (!raw || !/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return null
+  if (!isValidBase64(raw)) return null
 
   return {
     raw,
     size: getBase64Size(raw),
+  }
+}
+
+function isValidBase64(raw) {
+  if (!raw || raw.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return false
+  const hasPadding = raw.includes('=')
+  if (hasPadding && raw.length % 4 !== 0) return false
+
+  try {
+    const buffer = Buffer.from(raw, 'base64')
+    if (!buffer.length) return false
+
+    const normalizedInput = hasPadding ? raw : raw.replace(/=+$/, '')
+    const normalizedDecoded = hasPadding ? buffer.toString('base64') : buffer.toString('base64').replace(/=+$/, '')
+    return normalizedInput === normalizedDecoded
+  } catch {
+    return false
   }
 }
 
