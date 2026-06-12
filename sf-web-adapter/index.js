@@ -119,14 +119,22 @@ function normalizeImagePayload(image) {
 }
 
 function setCurrentWs(ws) {
+  const previous = currentWs
   currentWs = ws
   globalThis.currentWs = ws
+  if (previous && previous !== ws) notifyInactiveWs(previous)
 }
 
 function clearCurrentWs(ws) {
   if (currentWs === ws) {
     currentWs = null
     globalThis.currentWs = null
+  }
+}
+
+function notifyInactiveWs(ws) {
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'error', content: '当前连接已被新的 Web 会话接管，请重新连接' }))
   }
 }
 
@@ -448,6 +456,15 @@ function requireAuth(ws) {
   return true
 }
 
+function requireActiveWs(ws) {
+  if (!requireAuth(ws)) return false
+  if (currentWs !== ws) {
+    notifyInactiveWs(ws)
+    return false
+  }
+  return true
+}
+
 async function handleAuth(ws, msgObj) {
   const password = config.access_password
 
@@ -482,7 +499,7 @@ async function handleAuth(ws, msgObj) {
 }
 
 async function handleLoadHistory(ws, msgObj) {
-  if (!requireAuth(ws)) return
+  if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
   const key = `sf_web_adapter:history:${userQQ}`
   try {
@@ -506,7 +523,7 @@ async function handleLoadHistory(ws, msgObj) {
 }
 
 async function handleMessage(ws, msgObj) {
-  if (!requireAuth(ws)) return
+  if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
   const content = typeof msgObj.content === 'string' ? msgObj.content : ''
   const images = Array.isArray(msgObj.images) ? msgObj.images : []
@@ -571,7 +588,7 @@ async function handleMessage(ws, msgObj) {
 }
 
 async function handleClearHistory(ws, msgObj) {
-  if (!requireAuth(ws)) return
+  if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
   await redis.del(`sf_web_adapter:history:${userQQ}`)
   ws.send(JSON.stringify({ type: 'historyCleared' }))
@@ -641,7 +658,7 @@ const adapter = {
     return { time: Date.now() }
   },
 
-  async pickFriend(data, user_id) {
+  pickFriend(data, user_id) {
     if (typeof user_id !== 'string') user_id = String(user_id)
     user_id = user_id.replace(/^web_/, '')
     const fullUserId = `web_${user_id}`
