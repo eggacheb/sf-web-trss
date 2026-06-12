@@ -1,0 +1,7 @@
+.cursor/
+node_modules/
+sf-web-dev/
+siliconflow-plugin/
+TRSS-WeChat-OC-Plugin/
+.codex/
+.agents/

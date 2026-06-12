@@ -1,0 +1,10 @@
+{
+  "name": "sf-web-adapter",
+  "version": "1.0.0",
+  "description": "Yunzai Bot Web adapter plugin",
+  "main": "index.js",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}
