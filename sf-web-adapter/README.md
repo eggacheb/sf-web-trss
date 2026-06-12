@@ -3,6 +3,7 @@
 `sf-web-adapter` 是一个面向 TRSS-Yunzai / Yunzai 的 Web 私聊适配器插件。它在机器人进程内启动 WebSocket 服务，把浏览器侧消息注入为 Yunzai 私聊事件，并把机器人回复回传给当前 Web 会话。
 
 > 本插件现在不再内置 `web/` 静态前端目录。浏览器 UI 已拆分到独立仓库：`https://github.com/eggacheb/sf-web-trss-web`。
+> 入口结构参考 `TRSS-WeChat-OC-Plugin`：`index.js` 导出 `adapter`，调用 `Bot.adapter.push(adapter)`，并实现幂等的 `adapter.load()`，以兼容 TRSS-Yunzai 的 adapter loader。
 
 ## 功能
 
@@ -41,7 +42,7 @@ npm install
 | `ws_port` | `8082` | WebSocket 监听端口 |
 | `access_password` | 空 | 访问密码；留空表示免密连接 |
 | `site_title` | `云崽 Web 对话` | Bot 身份昵称和前端展示标题 |
-| `history_max` | `100` | 每个 Web 用户保留的历史消息数量，最大按代码限制为 `1000` |
+| `history_max` | `500` | 每个 Web 用户保留的历史消息数量，最大按代码限制为 `1000` |
 | `max_image_size` | `5242880` | 单张入站图片最大字节数，默认 5 MB |
 | `enable_typing` | `true` | 是否向 Web 前端发送输入状态 |
 | `debug` | `false` | 调试开关 |
@@ -68,7 +69,7 @@ your-bot-domain.com:8082
 - 数字 IP 目标：`wss://sfws.maliy.top?url=...`
 - HTTP 本地页面：直接连接 `ws://host:port`
 
-因为 `web/` 已拆出，本插件启动日志中的 `http://host:port` 只代表 adapter 监听地址。不要再依赖它作为内置 Web UI 首页。
+因为 `web/` 已拆出，本插件启动日志中的 `http://host:port` 只代表 adapter 监听地址。HTTP `/` 只返回一个端点说明，不再提供内置 Web UI 首页。
 
 ## WebSocket 协议
 
@@ -152,5 +153,7 @@ node --check apps/WebManagement.js
 node --check model/Config.js
 node --check model/path.js
 ```
+
+同时确认 `index.js` 保留 `export const adapter`、`async load()`、`Bot.adapter.push(adapter)` 和 `export { apps }`。TRSS-Yunzai 会在加载适配器时调用 `adapter.load()`，缺少该方法会导致 `TypeError: adapter.load is not a function`。
 
 如果改动了 WebSocket 协议，需要同步检查独立前端仓库 `sf-web-trss-web` 的连接、认证、历史、消息和清空历史流程。

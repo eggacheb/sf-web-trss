@@ -17,17 +17,26 @@ export function supportGuoba() {
     pluginInfo: {
       name: 'sf-web-adapter',
       title: 'Web 适配器',
-      author: ['@yourname'],
-      link: 'https://github.com/yourname/sf-web-adapter',
+      author: ['@eggacheb'],
+      authorLink: ['https://github.com/eggacheb'],
+      link: 'https://github.com/eggacheb/sf-web-trss',
       isV3: true,
       isV2: false,
       showInMenu: true,
-      description: '用 Web 浏览器替换微信的 Yunzai Bot 适配器',
+      description: '基于 TRSS-Yunzai 的 Web 私聊适配器插件，将浏览器消息接入 Yunzai 私聊事件流。',
       icon: 'mdi:web',
       iconColor: '#ff69b4',
     },
     configInfo: {
       schemas: [
+        {
+          component: 'Divider',
+          label: 'WebSocket 服务配置',
+          componentProps: {
+            orientation: 'left',
+            plain: true,
+          },
+        },
         {
           field: 'ws_host',
           label: '监听地址',
@@ -46,6 +55,14 @@ export function supportGuoba() {
           label: '访问密码',
           component: 'InputPassword',
           bottomHelpMessage: '留空 = 允许免密连接',
+        },
+        {
+          component: 'Divider',
+          label: '消息与显示配置',
+          componentProps: {
+            orientation: 'left',
+            plain: true,
+          },
         },
         {
           field: 'history_max',

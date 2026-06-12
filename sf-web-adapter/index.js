@@ -1,3 +1,5 @@
+logger.info(logger.yellow("- 正在加载 Web 适配器插件"))
+
 import WebSocket, { WebSocketServer } from 'ws'
 import http from 'http'
 import fs from 'fs'
@@ -6,7 +8,6 @@ import { fileURLToPath } from 'url'
 import { config } from './model/Config.js'
 import { pluginRoot } from './model/path.js'
 
-const publicRoot = path.join(pluginRoot, 'web', 'public')
 const botId = 'web_adapter'
 const messageCache = new Map()
 const MESSAGE_CACHE_TTL = 5 * 60 * 1000
@@ -342,7 +343,7 @@ async function restartWebServer() {
   return startWebServer()
 }
 
-// HTTP 静态文件服务
+// HTTP 服务仅作为 WebSocket 同端口承载，不再内置静态 Web UI。
 const server = http.createServer((req, res) => {
   let urlPath
   try {
@@ -353,51 +354,14 @@ const server = http.createServer((req, res) => {
     return
   }
 
-  const relativePath = urlPath === '/' || urlPath === '/index.html'
-    ? 'index.html'
-    : urlPath.replace(/^\/public\/?/i, '').replace(/^\/+/, '')
-
-  const normalizedPath = path.normalize(relativePath)
-  if (path.isAbsolute(normalizedPath) || normalizedPath.startsWith('..')) {
-    res.writeHead(403)
-    res.end('Forbidden')
+  if (urlPath === '/' || urlPath === '/index.html') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('SF Web Adapter WebSocket endpoint')
     return
   }
 
-  const fullPath = path.join(publicRoot, normalizedPath)
-  const relativeToPublic = path.relative(publicRoot, fullPath)
-  if (path.isAbsolute(relativeToPublic) || relativeToPublic.startsWith('..')) {
-    res.writeHead(403)
-    res.end('Forbidden')
-    return
-  }
-
-  const mimeTypes = {
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'application/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.ttf': 'font/ttf',
-    '.woff': 'font/woff',
-    '.woff2': 'font/woff2',
-  }
-
-  fs.readFile(fullPath, (err, data) => {
-    if (err) {
-      res.writeHead(404)
-      res.end('Not found')
-      return
-    }
-    const ext = path.extname(normalizedPath).toLowerCase()
-    res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' })
-    res.end(data)
-  })
+  res.writeHead(404)
+  res.end('Not found')
 })
 
 // WebSocket 服务（与 HTTP 同端口）
@@ -613,9 +577,70 @@ async function handleClearHistory(ws, msgObj) {
 
 // ---- 适配器注册 ----
 
-const adapter = {
-  id: 'sf-web-adapter',
-  name: 'Web Adapter',
+export const adapter = new class SFWebAdapter {
+  id = 'sf-web-adapter'
+  name = 'Web Adapter'
+  version = 'v1.0.0'
+
+  constructor() {
+    this.bots = new Map()
+    this._loaded = false
+    this._loadPromise = null
+  }
+
+  createBot() {
+    if (Bot[botId] && !Bot[botId]._stop) {
+      this.bots.set(botId, Bot[botId])
+      return Bot[botId]
+    }
+
+    Bot[botId] = {
+      adapter: this,
+      info: {
+        user_id: botId,
+        nickname: config.site_title || 'Web Adapter',
+      },
+      uin: botId,
+      get nickname() { return this.info.nickname },
+      version: {
+        id: this.id,
+        name: this.name,
+        version: this.version,
+      },
+      stat: { start_time: Date.now() / 1000 },
+      pickFriend: (user_id) => this.pickFriend({ self_id: botId }, user_id),
+      get pickUser() { return this.pickFriend },
+      getMsg: async (message_id) => this.getMsg({ self_id: botId }, message_id),
+      fl: new Map(),
+      gl: new Map(),
+      gml: new Map(),
+      _stop: false,
+    }
+
+    Bot.bots[botId] = Bot[botId]
+    this.bots.set(botId, Bot[botId])
+    Bot.makeLog('mark', `${this.name}(${this.id}) 已连接: ${Bot[botId].nickname}`, botId)
+    Bot.em(`connect.${botId}`, { self_id: botId })
+    return Bot[botId]
+  }
+
+  async load() {
+    if (this._loaded) return
+    if (this._loadPromise) return this._loadPromise
+
+    this._loadPromise = (async () => {
+      try {
+        this.createBot()
+        await startWebServer()
+        this._loaded = true
+      } catch (err) {
+        this._loadPromise = null
+        throw err
+      }
+    })()
+
+    return this._loadPromise
+  }
 
   async sendFriendMsg(data, msg) {
     let content = ''
@@ -673,7 +698,7 @@ const adapter = {
     }
 
     return { time: Date.now() }
-  },
+  }
 
   pickFriend(data, user_id) {
     if (typeof user_id !== 'string') user_id = String(user_id)
@@ -697,81 +722,59 @@ const adapter = {
       getFriendChatHistory: (messageSeq, count, reverseOrder = true) => this.getFriendMsgHistory(i, messageSeq, count, reverseOrder),
       getAvatarUrl: () => Promise.resolve(''),
     }
-  },
+  }
 
   async getFriendInfo(data) {
     return {
       user_id: data.user_id,
       nickname: data.sender?.nickname || data.user_id,
     }
-  },
+  }
 
   async recallMsg(data, messageId) {
     Bot.makeLog('info', `撤回消息：${messageId} (不支持)`, 'sf-web-adapter')
     return { error: 'Web 协议不支持撤回消息' }
-  },
+  }
 
   async getMsg(data, messageId) {
     return getCachedMessage(data.self_id, messageId)
-  },
+  }
 
   async getFriendMsgHistory(data, messageSeq, count = 1) {
     const message = getCachedMessage(data.self_id, messageSeq)
     if (!message) return []
     return Array.from({ length: Math.max(1, count) }, () => message).slice(0, 1)
-  },
+  }
 }
 
 Bot.adapter.push(adapter)
+adapter.load()
 
-Bot[botId] = {
-  adapter,
-  info: {
-    user_id: botId,
-    nickname: config.site_title || 'Web Adapter',
-  },
-  uin: botId,
-  get nickname() { return this.info.nickname },
-  version: {
-    id: 'sf-web-adapter',
-    name: 'Web Adapter',
-    version: 'v1.0.0',
-  },
-  stat: { start_time: Date.now() / 1000 },
-  pickFriend: (user_id) => adapter.pickFriend({ self_id: botId }, user_id),
-  get pickUser() { return this.pickFriend },
-  getMsg: async (message_id) => adapter.getMsg({ self_id: botId }, message_id),
-  fl: new Map(),
-  gl: new Map(),
-  gml: new Map(),
-  _stop: false,
-}
-Bot.bots[botId] = Bot[botId]
-Bot.em(`connect.${botId}`, { self_id: botId })
-
-const appRoot = path.join(pluginRoot, 'apps')
-const appFiles = fs.existsSync(appRoot)
-  ? fs.readdirSync(appRoot).filter(file => file.endsWith('.js'))
-  : []
-const appResults = await Promise.allSettled(appFiles.map(file => import(`./apps/${file}`)))
-const apps = {}
-for (let i = 0; i < appFiles.length; i++) {
-  const name = appFiles[i].replace(/\.js$/, '')
-  if (appResults[i].status !== 'fulfilled') {
-    Bot.makeLog('error', `载入 Web 适配器应用失败: ${name} ${appResults[i].reason?.message || appResults[i].reason}`, 'sf-web-adapter', true)
+let ret = []
+const files = fs
+  .readdirSync(path.join(pluginRoot, 'apps'))
+  .filter(file => file.endsWith('.js'))
+files.forEach((file) => {
+  ret.push(import(`./apps/${file}`))
+})
+ret = await Promise.allSettled(ret)
+let apps = {}
+for (let i in files) {
+  const name = files[i].replace('.js', '')
+  if (ret[i].status !== 'fulfilled') {
+    logger.error(`[Web 适配器] 载入插件错误：${logger.red(name)}`)
+    logger.error(ret[i].reason)
     continue
   }
-  const moduleExports = appResults[i].value
+  const moduleExports = ret[i].value
   const exported = moduleExports[Object.keys(moduleExports)[0]]
   if (!exported) {
-    Bot.makeLog('error', `载入 Web 适配器应用失败: ${name} 未找到导出类`, 'sf-web-adapter', true)
+    logger.error(`[Web 适配器] 载入插件错误：${logger.red(name)} 未找到导出类`)
     continue
   }
   apps[name] = exported
 }
 
-startWebServer().catch((err) => {
-  Bot.makeLog('error', `Web 适配器启动失败: ${err.message}`, 'sf-web-adapter', true)
-})
-
 export { apps }
+
+logger.info(logger.green("- Web 适配器插件 加载完成"))

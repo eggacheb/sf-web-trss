@@ -9,10 +9,12 @@
 ### 2. Signatures
 - Plugin app export: `export { apps }` from `index.js`.
 - App loader: load every `apps/*.js` module and map each file stem to its first exported class.
-- Plugin root path: derive from `fileURLToPath(import.meta.url)`, not only from `process.cwd()/plugins`, so static files resolve in both local review workspaces and Yunzai `plugins/` installs.
+- Adapter export/lifecycle: `index.js` must export `adapter`, push it with `Bot.adapter.push(adapter)`, and implement an idempotent `adapter.load()` method because TRSS-Yunzai's listener loader calls `await adapter.load()` for every registered adapter.
+- Plugin root path: follow the `TRSS-WeChat-OC-Plugin` pattern in `model/path.js`: derive `_path` from `process.cwd()`, derive `pluginName` from `import.meta.url`, and set `pluginRoot = path.join(_path, "plugins", pluginName)`. This adapter is expected to run from a TRSS-Yunzai `plugins/sf-web-adapter` install.
 - WebSocket input: `{ type: "auth" | "loadHistory" | "message" | "clearHistory", ... }`.
 - Frontend WebSocket URL resolver: when the page runs under `https:`, connect through the existing proxy endpoints instead of opening mixed-content `ws://` directly. Domain-like hosts (`/[a-zA-Z]/`) use `wss://hws.maliya.top/proxy?url=${encodeURIComponent("ws://host:port")}`; numeric IP hosts use `wss://sfws.maliy.top?url=${encodeURIComponent("ws://host:port")}`. Non-HTTPS local HTTP pages may connect directly to `ws://host:port`.
 - Static frontend ownership: `sf-web-adapter/` no longer owns a `web/public/` browser UI tree. Static UI files belong in the standalone `sf-web-trss-web` repository root. Do not reintroduce copied frontend build output into `sf-web-adapter/`; deploy the frontend independently and connect it to the adapter's `ws://host:port` endpoint.
+- Adapter HTTP server: keep the HTTP server only as the WebSocket same-port carrier. `/` or `/index.html` may return a plain endpoint message, but it must not read from `web/public/` or serve copied frontend assets.
 - Yunzai event: `Bot.em("message.private", e)`.
 - Reply path: `adapter.sendFriendMsg(data, msg)`.
 - Friend picker: `adapter.pickFriend(data, user_id)` / `Bot[botId].pickFriend(user_id)` must return the friend sendable object synchronously. Its `sendMsg` method may return a Promise, but `pickFriend(...).sendMsg(...)` must be chain-callable without `await`.
@@ -41,18 +43,23 @@
 
 ### 5. Good/Base/Bad Cases
 - Good: `apps/WebManagement.js` defines commands and `index.js` exports an `apps` object, so `#web状态`, `#web重启`, and `#web清空记录` are registered.
+- Good: `index.js` follows the `TRSS-WeChat-OC-Plugin` adapter pattern: `export const adapter = new class ...`, `async load()`, `Bot.adapter.push(adapter)`, and a guarded startup call so TRSS-Yunzai can call `adapter.load()` again without double-starting the server.
 - Good: `Bot[botId].pickFriend("web_123").sendMsg("hi")` works as a synchronous chain call; only `sendMsg` performs async I/O.
 - Good: a Netlify-hosted `https://...` page builds `wss://hws.maliya.top/proxy?...` for domain targets and `wss://sfws.maliy.top?...` for IP targets, while the same UI served from local HTTP keeps direct `ws://host:port`.
 - Good: importing the standalone `sf-web-trss-web` repository into Netlify or Vercel publishes the static UI from the repository root, then the UI connects to the adapter's `ws://host:port` endpoint.
+- Good: visiting `http://host:port/` returns a plain adapter endpoint message; the browser chat UI is loaded from `sf-web-trss-web`, not from the adapter plugin.
 - Base: Browser sends `{ type: "message", content: "hi", userQQ: "123" }`; adapter emits a private Yunzai event with `user_id: "web_123"`.
 - Bad: copying `sf-web-dev` or `sf-web-trss-web` static output back into `sf-web-adapter/web/public`; the adapter plugin becomes responsible for frontend assets again and future deployment checks drift between repositories.
+- Bad: keeping static file serving code that reads `path.join(pluginRoot, "web", "public")` after the `web/` directory has been removed.
+- Bad: pushing an adapter object without `load()` into `Bot.adapter`; TRSS-Yunzai logs `TypeError: adapter.load is not a function` during `lib/listener/loader.js` adapter loading.
 - Bad: Defining `apps/WebManagement.js` without an `index.js` `export { apps }`; the command class exists on disk but Yunzai never registers it.
-- Bad: Computing `pluginRoot` as `path.join(process.cwd(), "plugins", pluginName)` only; local review workspaces that keep the plugin at repository root will serve 404 for every static asset.
+- Bad: Diverging from the reference plugin path convention by mixing local workspace roots and TRSS runtime roots; install and test the adapter from `plugins/sf-web-adapter` so `model/path.js`, app loading, and resources resolve the same way as `TRSS-WeChat-OC-Plugin`.
 - Bad: Marking `pickFriend` as `async`; Yunzai/plugin code that calls `pickFriend(...).sendMsg(...)` receives a Promise and fails before `sendMsg` is reached.
 - Bad: Allowing an older authenticated socket to send `{ type: "message" }` after a newer socket has become active; the event is emitted from one page while replies go to another page.
 
 ### 6. Tests Required
 - Syntax: `node --check` for `index.js`, `model/*.js`, `apps/*.js`, and first-party browser JS.
+- Adapter lifecycle: assert `index.js` contains an exported adapter object with `id`, `name`, `version`, `load()`, `Bot.adapter.push(adapter)`, and an idempotent startup guard.
 - Contract: connect, authenticate, send a text message, and assert Yunzai receives `message.private`.
 - Contract: assert `Bot[botId].pickFriend(user_id).sendMsg` is a function without awaiting `pickFriend`.
 - Contract: authenticate socket A, authenticate socket B, then send `message` from socket A and assert no `message.private` event is emitted and socket A receives the inactive-connection error.
@@ -67,12 +74,31 @@
 
 #### Wrong
 ```javascript
-// apps/WebManagement.js exists, but index.js does not export apps.
-Bot.adapter.push(adapter)
+const adapter = {
+  id: "sf-web-adapter",
+  name: "Web Adapter",
+}
+
+Bot.adapter.push(adapter) // TRSS-Yunzai later calls adapter.load() and crashes.
 ```
 
 #### Correct
 ```javascript
+export const adapter = new class SFWebAdapter {
+  id = "sf-web-adapter"
+  name = "Web Adapter"
+  version = "v1.0.0"
+  _loaded = false
+
+  async load() {
+    if (this._loaded) return
+    this._loaded = true
+    // Create Bot instance and start the WebSocket service here.
+  }
+}
+
+Bot.adapter.push(adapter)
+
 const appFiles = fs.readdirSync(appRoot).filter(file => file.endsWith('.js'))
 const appResults = await Promise.allSettled(appFiles.map(file => import(`./apps/${file}`)))
 const apps = {}

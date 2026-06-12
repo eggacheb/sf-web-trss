@@ -1,9 +1,18 @@
 {
   "name": "sf-web-adapter",
   "version": "1.0.0",
-  "description": "Yunzai Bot Web adapter plugin",
+  "description": "TRSS-Yunzai Web adapter plugin",
   "main": "index.js",
   "type": "module",
+  "keywords": [
+    "yunzai",
+    "yunzai-bot",
+    "trss-yunzai",
+    "websocket",
+    "adapter"
+  ],
+  "author": "@eggacheb",
+  "license": "MIT",
   "dependencies": {
     "ws": "^8.21.0"
   }
