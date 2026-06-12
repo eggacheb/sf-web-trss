@@ -12,6 +12,7 @@
 - Plugin root path: derive from `fileURLToPath(import.meta.url)`, not only from `process.cwd()/plugins`, so static files resolve in both local review workspaces and Yunzai `plugins/` installs.
 - WebSocket input: `{ type: "auth" | "loadHistory" | "message" | "clearHistory", ... }`.
 - Frontend WebSocket URL resolver: when the page runs under `https:`, connect through the existing proxy endpoints instead of opening mixed-content `ws://` directly. Domain-like hosts (`/[a-zA-Z]/`) use `wss://hws.maliya.top/proxy?url=${encodeURIComponent("ws://host:port")}`; numeric IP hosts use `wss://sfws.maliy.top?url=${encodeURIComponent("ws://host:port")}`. Non-HTTPS local/plugin-hosted pages may connect directly to `ws://host:port`.
+- Static asset paths inside `sf-web-adapter/web/public/index.html`, browser JS fallback URLs, and `sw.js` precache entries must be relative to `web/public/` itself (`css/main.css`, `js/app.js`, `images/bot-avatar.png`, `manifest.json`). Do not keep the source `sf-web-dev` root-level `public/...` prefix after copying files into the adapter's `web/public/` directory.
 - Yunzai event: `Bot.em("message.private", e)`.
 - Reply path: `adapter.sendFriendMsg(data, msg)`.
 - Friend picker: `adapter.pickFriend(data, user_id)` / `Bot[botId].pickFriend(user_id)` must return the friend sendable object synchronously. Its `sendMsg` method may return a Promise, but `pickFriend(...).sendMsg(...)` must be chain-callable without `await`.
@@ -42,7 +43,9 @@
 - Good: `apps/WebManagement.js` defines commands and `index.js` exports an `apps` object, so `#web状态`, `#web重启`, and `#web清空记录` are registered.
 - Good: `Bot[botId].pickFriend("web_123").sendMsg("hi")` works as a synchronous chain call; only `sendMsg` performs async I/O.
 - Good: a Netlify-hosted `https://...` page builds `wss://hws.maliya.top/proxy?...` for domain targets and `wss://sfws.maliy.top?...` for IP targets, while the same UI served from local HTTP keeps direct `ws://host:port`.
+- Good: opening `sf-web-adapter/web/public/index.html` directly resolves `css/main.css`, `js/app.js`, `manifest.json`, and `images/*` from the same `web/public/` root.
 - Base: Browser sends `{ type: "message", content: "hi", userQQ: "123" }`; adapter emits a private Yunzai event with `user_id: "web_123"`.
+- Bad: copying `sf-web-dev/index.html` unchanged into `sf-web-adapter/web/public/index.html`; links like `public/css/main.css` resolve to `web/public/public/css/main.css` and the page renders as unstyled text/buttons.
 - Bad: Defining `apps/WebManagement.js` without an `index.js` `export { apps }`; the command class exists on disk but Yunzai never registers it.
 - Bad: Computing `pluginRoot` as `path.join(process.cwd(), "plugins", pluginName)` only; local review workspaces that keep the plugin at repository root will serve 404 for every static asset.
 - Bad: Marking `pickFriend` as `async`; Yunzai/plugin code that calls `pickFriend(...).sendMsg(...)` receives a Promise and fails before `sendMsg` is reached.
@@ -57,6 +60,7 @@
 - Clear: trigger both WebSocket `clearHistory` and `#web清空记录`, then assert the Redis key is deleted.
 - Media: send inbound image base64 and outbound image/record segments from `base64://`, `data:`, local path, `file://`, and URL forms, then assert Web UI renders image Markdown and `<audio controls>`.
 - Static deployment: under an `https:` page location, assert domain targets resolve to the `hws.maliya.top` proxy and IP targets resolve to the `sfws.maliy.top` proxy; under local `http:` assert direct `ws://host:port` is still used.
+- Static assets: parse `web/public/index.html` and assert every relative `href`/`src` target exists under `web/public/`; search first-party frontend files for stale `public/` asset prefixes.
 - Dependency: assert `package.json` and `sf-web-adapter/package.json` only add `ws` for this adapter.
 
 ### 7. Wrong vs Correct

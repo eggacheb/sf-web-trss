@@ -560,8 +560,8 @@ const MessageManager = {
             avatar.style.backgroundImage = `url(https://q1.qlogo.cn/g?b=qq&s=0&nk=${botQQ})`;
         } else {
             avatar.style.backgroundImage = position === 'left' ? 
-                'url("public/images/bot-avatar.png")' : 
-                'url("public/images/user-avatar.png")';
+                'url("images/bot-avatar.png")' : 
+                'url("images/user-avatar.png")';
         }
         
         const messageContent = document.createElement('div');
@@ -611,7 +611,7 @@ const MessageManager = {
         const botQQ = document.getElementById('bot-qq')?.value.trim();
         avatar.style.backgroundImage = botQQ 
             ? `url(https://q1.qlogo.cn/g?b=qq&s=0&nk=${botQQ})`
-            : 'url("public/images/bot-avatar.png")';
+            : 'url("images/bot-avatar.png")';
         
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
@@ -1099,7 +1099,7 @@ const App = {
         // 只在 http/https 协议下注册 ServiceWorker（本地 file:// 不支持）
         if ('serviceWorker' in navigator && location.protocol !== 'file:') {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js')
+                navigator.serviceWorker.register('sw.js')
                     .catch(err => console.warn('ServiceWorker 注册失败:', err));
             });
         }
