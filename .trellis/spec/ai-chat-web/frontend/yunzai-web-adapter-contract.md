@@ -11,6 +11,7 @@
 - App loader: load every `apps/*.js` module and map each file stem to its first exported class.
 - Plugin root path: derive from `fileURLToPath(import.meta.url)`, not only from `process.cwd()/plugins`, so static files resolve in both local review workspaces and Yunzai `plugins/` installs.
 - WebSocket input: `{ type: "auth" | "loadHistory" | "message" | "clearHistory", ... }`.
+- Frontend WebSocket URL resolver: when the page runs under `https:`, connect through the existing proxy endpoints instead of opening mixed-content `ws://` directly. Domain-like hosts (`/[a-zA-Z]/`) use `wss://hws.maliya.top/proxy?url=${encodeURIComponent("ws://host:port")}`; numeric IP hosts use `wss://sfws.maliy.top?url=${encodeURIComponent("ws://host:port")}`. Non-HTTPS local/plugin-hosted pages may connect directly to `ws://host:port`.
 - Yunzai event: `Bot.em("message.private", e)`.
 - Reply path: `adapter.sendFriendMsg(data, msg)`.
 - Friend picker: `adapter.pickFriend(data, user_id)` / `Bot[botId].pickFriend(user_id)` must return the friend sendable object synchronously. Its `sendMsg` method may return a Promise, but `pickFriend(...).sendMsg(...)` must be chain-callable without `await`.
@@ -40,6 +41,7 @@
 ### 5. Good/Base/Bad Cases
 - Good: `apps/WebManagement.js` defines commands and `index.js` exports an `apps` object, so `#web状态`, `#web重启`, and `#web清空记录` are registered.
 - Good: `Bot[botId].pickFriend("web_123").sendMsg("hi")` works as a synchronous chain call; only `sendMsg` performs async I/O.
+- Good: a Netlify-hosted `https://...` page builds `wss://hws.maliya.top/proxy?...` for domain targets and `wss://sfws.maliy.top?...` for IP targets, while the same UI served from local HTTP keeps direct `ws://host:port`.
 - Base: Browser sends `{ type: "message", content: "hi", userQQ: "123" }`; adapter emits a private Yunzai event with `user_id: "web_123"`.
 - Bad: Defining `apps/WebManagement.js` without an `index.js` `export { apps }`; the command class exists on disk but Yunzai never registers it.
 - Bad: Computing `pluginRoot` as `path.join(process.cwd(), "plugins", pluginName)` only; local review workspaces that keep the plugin at repository root will serve 404 for every static asset.
@@ -54,6 +56,7 @@
 - History: send user and bot messages, reconnect, and assert `history.messages` is chronological and capped by `history_max`.
 - Clear: trigger both WebSocket `clearHistory` and `#web清空记录`, then assert the Redis key is deleted.
 - Media: send inbound image base64 and outbound image/record segments from `base64://`, `data:`, local path, `file://`, and URL forms, then assert Web UI renders image Markdown and `<audio controls>`.
+- Static deployment: under an `https:` page location, assert domain targets resolve to the `hws.maliya.top` proxy and IP targets resolve to the `sfws.maliy.top` proxy; under local `http:` assert direct `ws://host:port` is still used.
 - Dependency: assert `package.json` and `sf-web-adapter/package.json` only add `ws` for this adapter.
 
 ### 7. Wrong vs Correct

@@ -660,8 +660,12 @@ const WebSocketManager = {
             }
             
             const serverAddress = port ? `${ip}:${port}` : `${ip}:8081`;
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${serverAddress}`;
+            const directUrl = `ws://${serverAddress}`;
+            const isDomain = /[a-zA-Z]/.test(ip);
+            const proxyUrl = isDomain
+                ? `wss://hws.maliya.top/proxy?url=${encodeURIComponent(directUrl)}`
+                : `wss://sfws.maliy.top?url=${encodeURIComponent(directUrl)}`;
+            const wsUrl = window.location.protocol === 'https:' ? proxyUrl : directUrl;
 
             AppState.wsConnection = new WebSocket(wsUrl);
             
