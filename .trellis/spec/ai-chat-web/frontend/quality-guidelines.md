@@ -47,6 +47,7 @@ Keep the composer position stable in CSS and use focus state only as a lightweig
 - On mobile breakpoints, the chat composer must keep `position: fixed`; do not switch it to `sticky` while an editable element can be focused.
 - The composer bottom offset must include `env(safe-area-inset-bottom, 0px)` with a plain `bottom` fallback.
 - Focus and resize handlers must not call `scrollIntoView` on the active composer textarea.
+- If a mobile browser fails to repaint `fixed` bottom elements after keyboard changes, drive the composer bottom with a CSS variable updated from `window.visualViewport.height` and `window.visualViewport.offsetTop`.
 
 ### Mobile Settings Form Contract
 
