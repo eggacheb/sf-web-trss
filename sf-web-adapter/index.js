@@ -5,6 +5,7 @@ import http from 'http'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { createHash } from 'crypto'
 import { config } from './model/Config.js'
 import { pluginRoot } from './model/path.js'
 
@@ -13,6 +14,21 @@ const messageCache = new Map()
 const MESSAGE_CACHE_TTL = 5 * 60 * 1000
 const MESSAGE_CACHE_LIMIT = 2
 const OUTBOUND_MEDIA_LIMIT = 50 * 1024 * 1024
+
+// 媒体持久化
+const MEDIA_ROOT = path.join(pluginRoot, 'data', 'media')
+const MEDIA_ID_PATTERN = /^[a-f0-9]{16}\.[a-z0-9]{2,5}$/
+const MEDIA_EXT_WHITELIST = new Set([
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif',
+  'mp3', 'ogg', 'wav', 'amr', 'silk', 'm4a', 'aac', 'flac',
+])
+const MEDIA_AUDIO_EXTS = new Set(['mp3', 'ogg', 'wav', 'amr', 'silk', 'm4a', 'aac', 'flac'])
+const MEDIA_SWEEP_INTERVAL = 60 * 60 * 1000
+const MEDIA_SERVE_LIMIT = 20 * 1024 * 1024
+const DEFAULT_MEDIA_RETENTION_DAYS = 14
+const DEFAULT_MEDIA_MAX_SIZE_MB = 500
+
+let lastMediaSweepAt = 0
 const skipHistoryKeys = globalThis.sfWebAdapterSkipHistoryKeys || new Set()
 globalThis.sfWebAdapterSkipHistoryKeys = skipHistoryKeys
 
@@ -213,6 +229,150 @@ async function readMediaSource(source, fallbackExt = '') {
   }
 }
 
+// ---- 媒体持久化：按内容哈希落盘，按 userQQ 分目录 ----
+
+function getMediaRetentionDays() {
+  const days = Number(config.media_retention_days)
+  return Number.isFinite(days) && days > 0 ? Math.min(days, 365) : DEFAULT_MEDIA_RETENTION_DAYS
+}
+
+function getMediaMaxBytes() {
+  const mb = Number(config.media_max_size_mb)
+  const value = Number.isFinite(mb) && mb > 0 ? Math.min(mb, 10240) : DEFAULT_MEDIA_MAX_SIZE_MB
+  return value * 1024 * 1024
+}
+
+function resolveMediaExt(ext, mime, kind) {
+  const value = String(ext || '').replace(/^\./, '').toLowerCase()
+  if (MEDIA_EXT_WHITELIST.has(value)) return value
+  const fromMime = getExtFromMime(mime).replace(/^\./, '')
+  if (fromMime && MEDIA_EXT_WHITELIST.has(fromMime)) return fromMime
+  return kind === 'record' ? 'mp3' : 'jpg'
+}
+
+function getMediaDir(userQQ) {
+  return path.join(MEDIA_ROOT, normalizeUserQQ(userQQ))
+}
+
+function buildMediaId(buffer, ext) {
+  const hash = createHash('sha1').update(buffer).digest('hex').slice(0, 16)
+  return `${hash}.${ext}`
+}
+
+async function saveMedia(userQQ, buffer, ext, mime, kind) {
+  if (!buffer?.length) return null
+  const safeExt = resolveMediaExt(ext, mime, kind)
+  const id = buildMediaId(buffer, safeExt)
+  const dir = getMediaDir(userQQ)
+  const filePath = path.join(dir, id)
+
+  try {
+    await fs.promises.mkdir(dir, { recursive: true })
+    await fs.promises.writeFile(filePath, buffer)
+    return {
+      id,
+      kind,
+      mime: mime || (kind === 'record' ? getAudioMime(`.${safeExt}`) : getImageMime(`.${safeExt}`)),
+      size: buffer.length,
+    }
+  } catch (err) {
+    Bot.makeLog('warn', `媒体落盘失败: ${err.message}`, 'sf-web-adapter', true)
+    return null
+  }
+}
+
+function resolveMediaPath(userQQ, id) {
+  if (!MEDIA_ID_PATTERN.test(String(id || ''))) return null
+  const baseDir = path.resolve(getMediaDir(userQQ))
+  const filePath = path.resolve(baseDir, id)
+  if (!filePath.startsWith(baseDir + path.sep)) return null
+  return filePath
+}
+
+async function readMediaById(userQQ, id) {
+  const filePath = resolveMediaPath(userQQ, id)
+  if (!filePath) return null
+
+  try {
+    const stat = await fs.promises.stat(filePath)
+    if (!stat.isFile() || stat.size > MEDIA_SERVE_LIMIT) return null
+    const buffer = await fs.promises.readFile(filePath)
+    const now = new Date()
+    fs.promises.utimes(filePath, now, now).catch(() => {})
+    const ext = path.extname(filePath).toLowerCase()
+    return {
+      buffer,
+      mime: MEDIA_AUDIO_EXTS.has(ext.slice(1)) ? getAudioMime(ext) : getImageMime(ext),
+    }
+  } catch {
+    return null
+  }
+}
+
+async function removeUserMedia(userQQ) {
+  try {
+    await fs.promises.rm(getMediaDir(userQQ), { recursive: true, force: true })
+    return true
+  } catch (err) {
+    Bot.makeLog('warn', `清理用户媒体失败: ${err.message}`, 'sf-web-adapter', true)
+    return false
+  }
+}
+
+async function sweepMediaStorage(force = false) {
+  const now = Date.now()
+  if (!force && now - lastMediaSweepAt < MEDIA_SWEEP_INTERVAL) return
+  lastMediaSweepAt = now
+
+  let userDirs = []
+  try {
+    userDirs = await fs.promises.readdir(MEDIA_ROOT, { withFileTypes: true })
+  } catch {
+    return
+  }
+
+  const maxAge = getMediaRetentionDays() * 24 * 60 * 60 * 1000
+  const maxBytes = getMediaMaxBytes()
+  const kept = []
+  let total = 0
+
+  for (const userDir of userDirs) {
+    if (!userDir.isDirectory()) continue
+    const dirPath = path.join(MEDIA_ROOT, userDir.name)
+
+    let files = []
+    try {
+      files = await fs.promises.readdir(dirPath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const file of files) {
+      if (!file.isFile()) continue
+      const filePath = path.join(dirPath, file.name)
+      const stat = await fs.promises.stat(filePath).catch(() => null)
+      if (!stat) continue
+
+      if (now - stat.mtimeMs > maxAge) {
+        await fs.promises.rm(filePath, { force: true }).catch(() => {})
+        continue
+      }
+
+      kept.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs })
+      total += stat.size
+    }
+  }
+
+  if (total <= maxBytes) return
+
+  kept.sort((a, b) => a.mtimeMs - b.mtimeMs)
+  for (const entry of kept) {
+    if (total <= maxBytes) break
+    await fs.promises.rm(entry.filePath, { force: true }).catch(() => {})
+    total -= entry.size
+  }
+}
+
 function pruneMessageCache(targetBotId) {
   const now = Date.now()
   const entries = []
@@ -407,6 +567,9 @@ wss.on('connection', (ws, req) => {
         case 'clearHistory':
           await handleClearHistory(ws, msgObj)
           break
+        case 'getMedia':
+          await handleGetMedia(ws, msgObj)
+          break
         default:
           ws.send(JSON.stringify({ type: 'error', content: '未知消息类型' }))
       }
@@ -503,6 +666,30 @@ async function handleLoadHistory(ws, msgObj) {
   }
 }
 
+async function handleGetMedia(ws, msgObj) {
+  if (!requireActiveWs(ws)) return
+  const userQQ = normalizeUserQQ(msgObj.userQQ)
+  const id = typeof msgObj.id === 'string' ? msgObj.id : ''
+
+  if (!MEDIA_ID_PATTERN.test(id)) {
+    ws.send(JSON.stringify({ type: 'mediaMissing', id }))
+    return
+  }
+
+  const media = await readMediaById(userQQ, id)
+  if (!media) {
+    ws.send(JSON.stringify({ type: 'mediaMissing', id }))
+    return
+  }
+
+  ws.send(JSON.stringify({
+    type: 'media',
+    id,
+    mime: media.mime,
+    dataUrl: `data:${media.mime};base64,${media.buffer.toString('base64')}`,
+  }))
+}
+
 async function handleMessage(ws, msgObj) {
   if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
@@ -572,6 +759,7 @@ async function handleClearHistory(ws, msgObj) {
   if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
   await redis.del(`sf_web_adapter:history:${userQQ}`)
+  await removeUserMedia(userQQ)
   ws.send(JSON.stringify({ type: 'historyCleared' }))
 }
 
@@ -632,6 +820,7 @@ export const adapter = new class SFWebAdapter {
       try {
         this.createBot()
         await startWebServer()
+        sweepMediaStorage(true).catch(() => {})
         this._loaded = true
       } catch (err) {
         this._loadPromise = null
@@ -644,33 +833,43 @@ export const adapter = new class SFWebAdapter {
 
   async sendFriendMsg(data, msg) {
     let content = ''
+    let mediaPos = 0
+    const medias = []
+    const fullUserId = typeof data.user_id === 'string' ? data.user_id : 'web_user'
+    const userQQ = normalizeUserQQ(fullUserId.replace(/^web_/, ''))
 
     for (const seg of normalizeSendSegments(msg)) {
       if (seg.type === 'text') {
         if (seg.text !== undefined && seg.text !== null) content += String(seg.text)
       } else if (seg.type === 'image') {
+        const pos = mediaPos++
         try {
           const media = await readMediaSource(seg.file || seg.url, '.jpg')
           if (!media?.buffer) {
             content += '\n[图片]'
             continue
           }
-          const base64 = media.buffer.toString('base64')
           const mime = media.mime?.startsWith('image/') ? media.mime : getImageMime(media.ext)
+          const stored = await saveMedia(userQQ, media.buffer, media.ext, mime, 'image')
+          if (stored) medias.push({ kind: 'image', id: stored.id, mime: stored.mime, pos })
+          const base64 = media.buffer.toString('base64')
           content += `\n![图片](data:${mime};base64,${base64})`
         } catch (err) {
           Bot.makeLog('warn', `图片消息转换失败: ${err.message}`, 'sf-web-adapter', true)
           content += '\n[图片]'
         }
       } else if (seg.type === 'record') {
+        const pos = mediaPos++
         try {
           const media = await readMediaSource(seg.file || seg.url, '.mp3')
           if (!media?.buffer) {
             content += '\n[语音]'
             continue
           }
-          const base64 = media.buffer.toString('base64')
           const mime = media.mime?.startsWith('audio/') ? media.mime : getAudioMime(media.ext)
+          const stored = await saveMedia(userQQ, media.buffer, media.ext, mime, 'record')
+          if (stored) medias.push({ kind: 'record', id: stored.id, mime: stored.mime, pos })
+          const base64 = media.buffer.toString('base64')
           content += `\n<audio controls src="data:${mime};base64,${base64}"></audio>`
         } catch (err) {
           Bot.makeLog('warn', `语音消息转换失败: ${err.message}`, 'sf-web-adapter', true)
@@ -688,14 +887,16 @@ export const adapter = new class SFWebAdapter {
       targetWs.send(JSON.stringify({ content }))
     }
 
-    const fullUserId = typeof data.user_id === 'string' ? data.user_id : 'web_user'
-    const userQQ = normalizeUserQQ(fullUserId.replace(/^web_/, ''))
     if (!shouldSkipNextHistory(fullUserId)) {
       const plainContent = toHistoryContent(content)
       const key = `sf_web_adapter:history:${userQQ}`
-      await redis.rPush(key, JSON.stringify({ role: 'bot', content: plainContent, timestamp: Date.now() }))
+      const entry = { role: 'bot', content: plainContent, timestamp: Date.now() }
+      if (medias.length) entry.medias = medias
+      await redis.rPush(key, JSON.stringify(entry))
       await redis.lTrim(key, -getHistoryLimit(), -1)
     }
+
+    sweepMediaStorage().catch(() => {})
 
     return { time: Date.now() }
   }

@@ -11,6 +11,9 @@ export const { config, configSave } = await makeConfig("SFWebAdapter", {
   history_max: 500,
   max_image_size: 5242880,
   enable_typing: true,
+  // 媒体缓存配置（图片/语音落盘，供前端离线后回看）
+  media_retention_days: 14,
+  media_max_size_mb: 500,
   debug: false,
 }, {
   tips: [

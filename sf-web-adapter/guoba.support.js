@@ -85,6 +85,28 @@ export function supportGuoba() {
           bottomHelpMessage: '浏览器标签和前端标题',
         },
         {
+          component: 'Divider',
+          label: '媒体缓存配置',
+          componentProps: {
+            orientation: 'left',
+            plain: true,
+          },
+        },
+        {
+          field: 'media_retention_days',
+          label: '媒体保留天数',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 365, step: 1 },
+          bottomHelpMessage: '图片与语音在服务端保留的天数，默认 14 天；清空对话时会立即删除',
+        },
+        {
+          field: 'media_max_size_mb',
+          label: '媒体缓存上限 (MB)',
+          component: 'InputNumber',
+          componentProps: { min: 50, max: 10240, step: 50 },
+          bottomHelpMessage: '媒体目录总大小上限，超出后按最旧优先清理，默认 500 MB',
+        },
+        {
           field: 'enable_typing',
           label: '正在输入',
           component: 'Switch',

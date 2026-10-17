@@ -86,8 +86,16 @@ your-bot-domain.com:8082
 | `access_password` | 空 | 留空表示免密 |
 | `history_max` | `500` | 每个用户保留的历史条数（硬上限 1000） |
 | `max_image_size` | `5242880` | 单张上行图片上限，5 MB |
+| `media_retention_days` | `14` | 图片/语音在服务端保留天数 |
+| `media_max_size_mb` | `500` | 媒体目录总大小上限 |
 
 改完端口或密码后执行 `#web重启`，或者重启 Yunzai。
+
+### 关于离线消息
+
+机器人主动推送的图片和语音会落盘到 `sf-web-adapter/data/media/<userQQ>/`，历史记录里只存引用。前端打开时先从本地 IndexedDB 取，取不到再按 `id` 通过 WebSocket 向插件拉取 —— **所以就算你几小时后才打开网页，图片和语音依然在**。
+
+清理是双保险：结束对话（`#web清空记录` 或前端「清空页面」）会立刻删掉该用户的媒体目录；即使一直不清，超过 `media_retention_days` 天或总量超过 `media_max_size_mb` 也会自动清理最旧的文件。
 
 ## 目录结构
 
@@ -97,6 +105,7 @@ trsssf/
 │   ├── index.js             WS 服务 + adapter 注册 + 消息收发
 │   ├── apps/                #web 管理指令
 │   ├── model/               配置与路径
+│   ├── data/media/          运行期媒体缓存（不入库）
 │   └── guoba.support.js     锅巴面板 schema
 ├── .trellis/                工作流：spec / tasks / workspace
 ├── AGENTS.md

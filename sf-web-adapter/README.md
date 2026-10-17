@@ -25,6 +25,7 @@ sf-web-adapter/
 │   ├── Config.js         makeConfig 配置定义
 │   └── path.js           插件根路径
 ├── guoba.support.js      锅巴面板 schema
+├── data/media/           运行期媒体缓存（按用户分目录，不入库）
 ├── package.json
 └── README.md
 ```
@@ -64,6 +65,8 @@ npm install
 | `history_max` | `500` | 每个 Web 用户保留的历史消息数量，最大按代码限制为 `1000` |
 | `max_image_size` | `5242880` | 单张入站图片最大字节数，默认 5 MB |
 | `enable_typing` | `true` | 是否向 Web 前端发送输入状态 |
+| `media_retention_days` | `14` | 媒体文件保留天数，超期自动清理 |
+| `media_max_size_mb` | `500` | 媒体目录总大小上限，超出按最旧优先清理 |
 | `debug` | `false` | 调试开关 |
 
 修改监听地址、端口或密码后，建议使用 `#web重启` 或重启 Yunzai。
@@ -140,6 +143,35 @@ ws://<host>:<ws_port>
 - `{ "type": "typing", "active": true }`
 - `{ "content": "机器人回复内容" }`
 - `{ "type": "error", "content": "错误原因" }`
+
+拉取历史消息里的媒体（前端本地缓存未命中时）：
+
+```json
+{ "type": "getMedia", "userQQ": "123456", "id": "a1b2c3d4e5f6a7b8.jpg" }
+```
+
+服务端返回：
+
+```json
+{ "type": "media", "id": "a1b2c3d4e5f6a7b8.jpg", "mime": "image/jpeg", "dataUrl": "data:image/jpeg;base64,..." }
+```
+
+文件已过期清理或 id 非法时返回 `{ "type": "mediaMissing", "id": "..." }`。
+
+## 媒体持久化
+
+图片和语音在转发的同时会落盘，供前端离线后重新打开时回看：
+
+```text
+plugins/sf-web-adapter/data/media/<userQQ>/<内容哈希前16位>.<ext>
+```
+
+- 同一张图重复发送只存一份（按内容哈希去重）
+- 历史记录只保存媒体引用 `{ kind, id, mime, pos }`，不存 base64，避免撑爆 Redis
+- 前端加载历史后按 `id` 通过 `getMedia` 拉取，拿到 `dataUrl` 后渲染并写入自己的 IndexedDB
+- `pos` 是该媒体在本条消息里的第几个占位符（从 0 开始），个别媒体缺失时前端不会错位填充
+- 清理有两个来源：`#web清空记录` 或前端「清空页面」会立即删除该用户的整个媒体目录；此外按 `media_retention_days`、`media_max_size_mb` 每小时兜底清理一次
+- `data/` 已在 `.gitignore` 中排除，不会进版本库
 
 同一时间只有最后一个认证成功的 WebSocket 会话可以注入消息和修改历史。旧连接如果继续发送消息，会收到“当前连接已被新的 Web 会话接管”的错误。
 
