@@ -1,7 +1,11 @@
 .cursor/
 node_modules/
 sf-web-dev/
+sf-web-trss-web/
 siliconflow-plugin/
 TRSS-WeChat-OC-Plugin/
 .codex/
 .agents/
+
+# 本地打包产物
+/*.zip

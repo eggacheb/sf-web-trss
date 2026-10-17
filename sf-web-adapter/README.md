@@ -14,6 +14,23 @@
 - 支持访问密码、历史条数、图片大小、输入状态等配置。
 - 提供 `#web状态`、`#web重启`、`#web清空记录` 管理命令。
 
+## 目录结构
+
+```text
+sf-web-adapter/
+├── index.js              WebSocket 服务、adapter 注册、消息收发
+├── apps/
+│   └── WebManagement.js  #web状态 / #web重启 / #web清空记录
+├── model/
+│   ├── Config.js         makeConfig 配置定义
+│   └── path.js           插件根路径
+├── guoba.support.js      锅巴面板 schema
+├── package.json
+└── README.md
+```
+
+第三方依赖只有 `ws`。分发时不需要附带 `node_modules`，目标机器执行 `npm install` 即可。
+
 ## 安装
 
 将 `sf-web-adapter` 目录放到 Yunzai 的 `plugins/` 目录下，最终结构应类似：
@@ -29,6 +46,8 @@
 cd /path/to/TRSS-Yunzai/plugins/sf-web-adapter
 npm install
 ```
+
+需要 Node.js 18 或更高版本（与 TRSS-Yunzai 的要求保持一致）。
 
 插件只额外依赖 `ws`，不要把独立前端仓库或构建产物放回本插件目录。
 
@@ -157,3 +176,7 @@ node --check model/path.js
 同时确认 `index.js` 保留 `export const adapter`、`async load()`、`Bot.adapter.push(adapter)` 和 `export { apps }`。TRSS-Yunzai 会在加载适配器时调用 `adapter.load()`，缺少该方法会导致 `TypeError: adapter.load is not a function`。
 
 如果改动了 WebSocket 协议，需要同步检查独立前端仓库 `sf-web-trss-web` 的连接、认证、历史、消息和清空历史流程。
+
+## 许可证
+
+MIT
