@@ -4,10 +4,10 @@ import WebSocket, { WebSocketServer } from 'ws'
 import http from 'http'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { createHash } from 'crypto'
 import { config } from './model/Config.js'
 import { pluginRoot } from './model/path.js'
+import { resolveMediaRef, sanitizeMediaLogText } from './model/Media.js'
 
 const botId = 'web_adapter'
 const messageCache = new Map()
@@ -101,15 +101,6 @@ function getExtFromMime(mime) {
   return extMap[normalized] || ''
 }
 
-function parseDataUrl(source) {
-  const match = String(source).match(/^data:([^;]+);base64,([\s\S]+)$/i)
-  if (!match) return null
-  return {
-    mime: match[1].toLowerCase(),
-    base64: match[2].replace(/\s+/g, ''),
-  }
-}
-
 function normalizeUserQQ(value) {
   const raw = typeof value === 'string' ? value.trim() : ''
   return raw.replace(/[^\w.-]/g, '_').slice(0, 64) || 'web_user'
@@ -184,48 +175,14 @@ function normalizeSendSegments(msg) {
 }
 
 async function readMediaSource(source, fallbackExt = '') {
-  if (Buffer.isBuffer(source)) {
-    return { buffer: source, ext: fallbackExt, mime: '' }
-  }
+  if (!Buffer.isBuffer(source) && (typeof source !== 'string' || !source)) return null
 
-  if (typeof source !== 'string' || !source) return null
-
-  if (source.startsWith('base64://')) {
-    return {
-      buffer: Buffer.from(source.replace(/^base64:\/\//i, '').replace(/\s+/g, ''), 'base64'),
-      ext: fallbackExt,
-      mime: '',
-    }
-  }
-
-  const dataUrl = parseDataUrl(source)
-  if (dataUrl) {
-    return {
-      buffer: Buffer.from(dataUrl.base64, 'base64'),
-      ext: getExtFromMime(dataUrl.mime) || fallbackExt,
-      mime: dataUrl.mime,
-    }
-  }
-
-  if (/^https?:\/\//i.test(source)) {
-    if (typeof fetch !== 'function') throw new Error('当前 Node.js 版本不支持 fetch，无法读取远程媒体')
-    const response = await fetch(source)
-    if (!response.ok) throw new Error(`远程媒体读取失败: HTTP ${response.status}`)
-    const contentType = response.headers.get('content-type') || ''
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.length > OUTBOUND_MEDIA_LIMIT) throw new Error(`远程媒体过大: ${formatSize(buffer.length)}`)
-    return {
-      buffer,
-      ext: getExtFromMime(contentType) || path.extname(new URL(source).pathname) || fallbackExt,
-      mime: contentType.split(';')[0].toLowerCase(),
-    }
-  }
-
-  const filePath = source.startsWith('file://') ? fileURLToPath(source) : source
+  // 统一交给 Media.js：内容嗅探 + 异步读取 + 超时/大小限制
+  const media = await resolveMediaRef(source, { maxBytes: OUTBOUND_MEDIA_LIMIT })
   return {
-    buffer: fs.readFileSync(filePath),
-    ext: path.extname(filePath) || fallbackExt,
-    mime: '',
+    buffer: media.buffer,
+    ext: media.extension || fallbackExt,
+    mime: media.mimeType === 'application/octet-stream' ? '' : media.mimeType,
   }
 }
 
@@ -864,7 +821,7 @@ export const adapter = new class SFWebAdapter {
           const base64 = media.buffer.toString('base64')
           content += `\n![图片](data:${mime};base64,${base64})`
         } catch (err) {
-          Bot.makeLog('warn', `图片消息转换失败: ${err.message}`, 'sf-web-adapter', true)
+          Bot.makeLog('warn', `图片消息转换失败: ${sanitizeMediaLogText(err.message)}`, 'sf-web-adapter', true)
           content += '\n[图片]'
         }
       } else if (seg.type === 'record') {
@@ -881,7 +838,7 @@ export const adapter = new class SFWebAdapter {
           const base64 = media.buffer.toString('base64')
           content += `\n<audio controls src="data:${mime};base64,${base64}"></audio>`
         } catch (err) {
-          Bot.makeLog('warn', `语音消息转换失败: ${err.message}`, 'sf-web-adapter', true)
+          Bot.makeLog('warn', `语音消息转换失败: ${sanitizeMediaLogText(err.message)}`, 'sf-web-adapter', true)
           content += '\n[语音]'
         }
       } else if (seg.type !== 'at' && seg.type !== 'reply' && seg.type !== 'button') {
