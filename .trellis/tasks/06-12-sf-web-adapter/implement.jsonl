@@ -1,0 +1,10 @@
+{"file": ".trellis/tasks/06-12-sf-web-adapter/prd.md", "reason": "PRD — canonical requirements, acceptance criteria, protocol, and image/audio strategy"}
+{"file": ".trellis/tasks/06-12-sf-web-adapter/weak-model-implementation-prompts.md", "reason": "Implementation plan — Step 0~7 with code blocks for all files"}
+{"file": "TRSS-WeChat-OC-Plugin/index.js", "reason": "Reference: adapter registration pattern, sendFriendMsg, pickFriend, Bot.em event emission"}
+{"file": "TRSS-WeChat-OC-Plugin/model/Config.js", "reason": "Reference: makeConfig usage with tips as first-level property"}
+{"file": "TRSS-WeChat-OC-Plugin/model/path.js", "reason": "Reference: path constants pattern"}
+{"file": "TRSS-WeChat-OC-Plugin/apps/Login.js", "reason": "Reference: command registration via plugin base class"}
+{"file": "TRSS-WeChat-OC-Plugin/guoba.support.js", "reason": "Reference: guoba export function supportGuoba() format"}
+{"file": "sf-web-dev/index.html", "reason": "Source frontend: HTML structure with mode-toggle to remove"}
+{"file": "sf-web-dev/public/js/app.js", "reason": "Source frontend: JS modules to simplify (ModeManager, send, loadHistory, EventBinder)"}
+{"file": "sf-web-dev/public/css/main.css", "reason": "Source frontend: CSS with ss/gg/dd mode styles to remove"}
