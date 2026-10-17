@@ -15,6 +15,31 @@ const MESSAGE_CACHE_TTL = 5 * 60 * 1000
 const MESSAGE_CACHE_LIMIT = 2
 const OUTBOUND_MEDIA_LIMIT = 50 * 1024 * 1024
 
+// 未单独处理的 segment 用占位符表示，避免把内部 JSON 结构直接显示给用户
+const SEGMENT_PLACEHOLDERS = {
+  video: '[视频]',
+  file: '[文件]',
+  forward: '[聊天记录]',
+  node: '[聊天记录]',
+  face: '[表情]',
+  mface: '[表情]',
+  bface: '[表情]',
+  poke: '[戳一戳]',
+  location: '[位置]',
+  contact: '[名片]',
+  share: '[链接]',
+  music: '[音乐]',
+  json: '[卡片]',
+  xml: '[卡片]',
+  dice: '[骰子]',
+  rps: '[猜拳]',
+}
+
+// 这些占位符代表一整块内容，前后各占一行；表情、戳一戳之类的保持行内
+const BLOCK_SEGMENTS = new Set([
+  'video', 'file', 'forward', 'node', 'location', 'contact', 'share', 'music', 'json', 'xml',
+])
+
 // 媒体持久化
 const MEDIA_ROOT = path.join(pluginRoot, 'data', 'media')
 const MEDIA_ID_PATTERN = /^[a-f0-9]{16}\.[a-z0-9]{2,5}$/
@@ -796,7 +821,9 @@ export const adapter = new class SFWebAdapter {
     const fullUserId = typeof data.user_id === 'string' ? data.user_id : 'web_user'
     const userQQ = normalizeUserQQ(fullUserId.replace(/^web_/, ''))
 
-    for (const seg of normalizeSendSegments(msg)) {
+    const segments = normalizeSendSegments(msg)
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]
       if (seg.type !== 'text') lastWasText = false
       if (seg.type === 'text') {
         if (seg.text !== undefined && seg.text !== null) {
@@ -842,7 +869,15 @@ export const adapter = new class SFWebAdapter {
           content += '\n[语音]'
         }
       } else if (seg.type !== 'at' && seg.type !== 'reply' && seg.type !== 'button') {
-        content += JSON.stringify(seg)
+        const label = SEGMENT_PLACEHOLDERS[seg.type]
+        const text = label || (seg.text ? String(seg.text) : `[${seg.type}]`)
+        if (BLOCK_SEGMENTS.has(seg.type)) {
+          if (content && !content.endsWith('\n')) content += '\n'
+          content += text
+          if (i < segments.length - 1) content += '\n'
+        } else {
+          content += text
+        }
       }
     }
 
