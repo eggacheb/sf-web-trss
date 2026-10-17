@@ -85,11 +85,12 @@ npm install
 your-bot-domain.com:8082
 ```
 
-如果前端运行在 HTTPS 页面下，独立前端会按地址类型使用代理连接：
+如果前端运行在 HTTPS 页面下，浏览器会拦截 `ws://` 明文连接（混合内容）。当前前端采用直连方案，两条路可选：
 
-- 域名目标：`wss://hws.maliya.top/proxy?url=...`
-- 数字 IP 目标：`wss://sfws.maliy.top?url=...`
-- HTTP 本地页面：直接连接 `ws://host:port`
+- **浏览器放行**：在浏览器设置里把 adapter 地址标记为「不安全内容允许」（桌面 Chrome/Edge 和 Android Chrome 都有对应开关，前端 README 有具体步骤）
+- **自建 WSS 入口**：用 Nginx / Caddy 反向代理加证书，再把完整地址写进前端的 `WS_DIRECT_URL`
+
+HTTP 页面（含 localhost）直接连接 `ws://host:port`，不需要任何额外配置。
 
 因为 `web/` 已拆出，本插件启动日志中的 `http://host:port` 只代表 adapter 监听地址。HTTP `/` 只返回一个端点说明，不再提供内置 Web UI 首页。
 

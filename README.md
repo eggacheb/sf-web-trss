@@ -8,7 +8,7 @@
 
 ```text
 浏览器（静态前端，可部署在 HTTPS 上）
-        │  ws://host:8082 直连，或 wss:// 经代理
+        │  ws://host:8082 直连，或自建 wss:// 反向代理
         ▼
 sf-web-adapter 插件（0.0.0.0:8082，只跑 WebSocket）
         │  Bot.em("message.private", e)
