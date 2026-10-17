@@ -16,10 +16,14 @@ export class WebManagement extends plugin {
   }
 
   async status() {
+    const version = globalThis.sfWebAdapter?.version || '未知'
+    const stats = globalThis.sfWebAdapter?.getSendStats?.()
     const msg = [
       '━━ Web 适配器状态 ━━',
+      `版本: ${version}`,
       `端口: ${config.ws_port || '未启动'}`,
       `连接: ${globalThis.currentWs ? '已连接' : '未连接'}`,
+      `最近发送: ${stats ? `${stats.segments} 段 / ${stats.newlines} 换行 / ${stats.chars} 字${stats.invisible ? ` / ${stats.invisible} 个隐藏分隔符` : ''}` : '暂无'}`,
       ``,
       `指令列表:`,
       `  #web状态 — 查看本页`,

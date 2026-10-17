@@ -4,10 +4,15 @@ import WebSocket, { WebSocketServer } from 'ws'
 import http from 'http'
 import fs from 'fs'
 import path from 'path'
+import { createRequire } from 'module'
 import { createHash } from 'crypto'
 import { config } from './model/Config.js'
 import { pluginRoot } from './model/path.js'
 import { resolveMediaRef, sanitizeMediaLogText } from './model/Media.js'
+
+const pkg = createRequire(import.meta.url)('./package.json')
+const ADAPTER_VERSION = pkg.version
+logger.info(logger.green(`- Web 适配器版本 ${ADAPTER_VERSION}`))
 
 const botId = 'web_adapter'
 const messageCache = new Map()
@@ -39,6 +44,9 @@ const SEGMENT_PLACEHOLDERS = {
 const BLOCK_SEGMENTS = new Set([
   'video', 'file', 'forward', 'node', 'location', 'contact', 'share', 'music', 'json', 'xml',
 ])
+
+// 诊断用：最近一条外发消息的段落数 / 换行数，#web状态 会显示
+let lastSendStats = null
 
 // 媒体持久化
 const MEDIA_ROOT = path.join(pluginRoot, 'data', 'media')
@@ -515,6 +523,8 @@ const wss = new WebSocketServer({
 let currentWs = null
 
 globalThis.sfWebAdapter = {
+  version: ADAPTER_VERSION,
+  getSendStats: () => lastSendStats,
   restartWebServer,
   startWebServer,
   stopWebServer,
@@ -882,6 +892,18 @@ export const adapter = new class SFWebAdapter {
     }
 
     if (!content) return { data: { skipped: true, reason: 'empty_content' } }
+
+    // 诊断用：状态指令自己不算，避免把上一次查询的结果当成样本
+    if (!content.startsWith('━━ Web 适配器状态')) {
+      lastSendStats = {
+        segments: segments.length,
+        newlines: (content.match(/\n/g) || []).length,
+        // 零宽空格、行分隔符之类：看着像换行，但 markdown 和浏览器都不认
+        invisible: (content.match(/[\u200b\u2028\u2029\ufeff]/g) || []).length,
+        chars: content.length,
+        at: Date.now(),
+      }
+    }
 
     const targetWs = currentWs
     if (targetWs?.isAuthenticated && targetWs.readyState === WebSocket.OPEN) {
