@@ -833,14 +833,23 @@ export const adapter = new class SFWebAdapter {
 
   async sendFriendMsg(data, msg) {
     let content = ''
+    let lastWasText = false
     let mediaPos = 0
     const medias = []
     const fullUserId = typeof data.user_id === 'string' ? data.user_id : 'web_user'
     const userQQ = normalizeUserQQ(fullUserId.replace(/^web_/, ''))
 
     for (const seg of normalizeSendSegments(msg)) {
+      if (seg.type !== 'text') lastWasText = false
       if (seg.type === 'text') {
-        if (seg.text !== undefined && seg.text !== null) content += String(seg.text)
+        if (seg.text !== undefined && seg.text !== null) {
+          const text = String(seg.text)
+          // Yunzai 常把长文本按行拆成多个 text 段传进来。首尾直接相接会把整段黏成
+          // 一行，markdown 的标题、引用、表格、代码围栏全部失效，这里补回换行。
+          if (lastWasText && content && !content.endsWith('\n')) content += '\n'
+          content += text
+          if (text) lastWasText = true
+        }
       } else if (seg.type === 'image') {
         const pos = mediaPos++
         try {
