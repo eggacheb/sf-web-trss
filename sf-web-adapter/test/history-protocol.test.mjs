@@ -32,6 +32,7 @@ let port
 let adapter
 let client
 let emittedEvents = []
+let logLines = []
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -83,6 +84,7 @@ export default class Plugin {
 
 function installGlobals() {
   emittedEvents = []
+  logLines = []
   const lists = new Map()
   globalThis.logger = {
     info() {}, warn() {}, error() {}, mark() {},
@@ -110,7 +112,7 @@ function installGlobals() {
   globalThis.Bot = {
     adapter: [],
     bots: {},
-    makeLog() {},
+    makeLog(level, message) { logLines.push({ level, message: String(message) }) },
     em(event, data) { emittedEvents.push({ event, data }) },
   }
 }
@@ -273,6 +275,16 @@ test('后端是历史消息的唯一数据源', async (t) => {
       )
       assert.match(error.content, /接管/)
       second.close()
+    })
+
+    await t.test('关键运行节点都有 info 日志，且不泄露消息正文', () => {
+      const infos = logLines.filter((line) => line.level === 'info').map((line) => line.message)
+      for (const needle of ['服务已启动', '客户端连接', '认证通过', '收到消息', '回复', '加载历史', '清空对话记录']) {
+        assert.ok(infos.some((line) => line.includes(needle)), `缺少 info 日志: ${needle}`)
+      }
+      assert.ok(infos.every((line) => !line.includes('看看这张图')), '日志不能包含消息正文')
+      assert.ok(infos.every((line) => !line.includes('base64,')), '日志不能包含 base64')
+      assert.ok(infos.every((line) => !line.includes('[debug]')), 'debug 关闭时不应输出细节日志')
     })
   } finally {
     if (client && client.readyState === WebSocket.OPEN) client.close()

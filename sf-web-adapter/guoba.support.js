@@ -116,7 +116,7 @@ export function supportGuoba() {
           field: 'debug',
           label: '调试模式',
           component: 'Switch',
-          bottomHelpMessage: '控制台输出 debug 信息',
+          bottomHelpMessage: '额外输出媒体读写、历史游标等细节日志；关键事件始终输出',
         },
       ],
       getConfigData() {

@@ -87,6 +87,31 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+// 运行日志统一走这里：只记状态与数量，不记消息正文、密码或 base64。
+// debug 开关控制高频细节（媒体读写等），关键事件始终输出。
+const LOG_TAG = 'sf-web-adapter'
+
+function logInfo(message) {
+  Bot.makeLog('info', `[Web] ${message}`, LOG_TAG, true)
+}
+
+function logWarn(message) {
+  Bot.makeLog('warn', `[Web] ${message}`, LOG_TAG, true)
+}
+
+function logDebug(message) {
+  if (!config.debug) return
+  Bot.makeLog('info', `[Web][debug] ${message}`, LOG_TAG, true)
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+}
+
 function getImageMime(ext) {
   const normalized = String(ext || '').toLowerCase()
   const mimeMap = {
@@ -290,6 +315,7 @@ async function saveMedia(userQQ, buffer, ext, mime, kind) {
 
   try {
     await task
+    logDebug(`媒体落盘 ${userQQ}/${id}（${buffer.length} 字节，${meta.mime}）`)
     return meta
   } catch (err) {
     Bot.makeLog('warn', `媒体落盘失败: ${err.message}`, 'sf-web-adapter', true)
@@ -330,6 +356,7 @@ async function readMediaById(userQQ, id) {
 async function removeUserMedia(userQQ) {
   try {
     await fs.promises.rm(getMediaDir(userQQ), { recursive: true, force: true })
+    logDebug(`媒体目录已删除 ${userQQ}`)
     return true
   } catch (err) {
     Bot.makeLog('warn', `清理用户媒体失败: ${err.message}`, 'sf-web-adapter', true)
@@ -353,6 +380,8 @@ async function sweepMediaStorage(force = false) {
   const maxBytes = getMediaMaxBytes()
   const kept = []
   let total = 0
+  let expired = 0
+  let released = 0
 
   for (const userDir of userDirs) {
     if (!userDir.isDirectory()) continue
@@ -373,6 +402,8 @@ async function sweepMediaStorage(force = false) {
 
       if (now - stat.mtimeMs > maxAge) {
         await fs.promises.rm(filePath, { force: true }).catch(() => {})
+        expired++
+        released += stat.size
         continue
       }
 
@@ -381,13 +412,22 @@ async function sweepMediaStorage(force = false) {
     }
   }
 
-  if (total <= maxBytes) return
+  let trimmed = 0
+  if (total > maxBytes) {
+    kept.sort((a, b) => a.mtimeMs - b.mtimeMs)
+    for (const entry of kept) {
+      if (total <= maxBytes) break
+      await fs.promises.rm(entry.filePath, { force: true }).catch(() => {})
+      total -= entry.size
+      released += entry.size
+      trimmed++
+    }
+  }
 
-  kept.sort((a, b) => a.mtimeMs - b.mtimeMs)
-  for (const entry of kept) {
-    if (total <= maxBytes) break
-    await fs.promises.rm(entry.filePath, { force: true }).catch(() => {})
-    total -= entry.size
+  if (expired || trimmed) {
+    logInfo(`媒体清理: 过期 ${expired} 个 / 超限 ${trimmed} 个，释放 ${formatSize(released)}，剩余 ${formatSize(total)}`)
+  } else {
+    logDebug(`媒体清理: 无需清理（${kept.length} 个文件，${formatSize(total)}）`)
   }
 }
 
@@ -483,6 +523,7 @@ async function stopWebServer() {
       else resolve()
     })
   })
+  logInfo('服务已停止')
   return { stopped: true }
 }
 
@@ -503,11 +544,12 @@ async function startWebServer() {
     server.listen(config.ws_port, config.ws_host, onListening)
   })
 
-  Bot.makeLog('info', `Web 适配器已启动: ${getWebUrl()}`, 'sf-web-adapter', true)
+  logInfo(`服务已启动 ${getWebUrl()}（鉴权: ${config.access_password ? '已开启' : '免密'}，历史上限 ${getHistoryLimit()} 条，debug: ${config.debug ? '开' : '关'}）`)
   return { started: true, url: getWebUrl() }
 }
 
 async function restartWebServer() {
+  logInfo('正在重启服务...')
   await stopWebServer()
   return startWebServer()
 }
@@ -550,18 +592,22 @@ globalThis.sfWebAdapter = {
   skipNextHistory,
   clearUserHistory,
   notifyHistoryCleared,
+  logInfo,
 }
 
 wss.on('connection', (ws, req) => {
   ws.isAuthenticated = !config.access_password
   ws.clientIp = req.socket.remoteAddress
+  ws.connectedAt = Date.now()
   if (ws.isAuthenticated) setCurrentWs(ws)
+  logInfo(`客户端连接 ${ws.clientIp || '未知来源'}（${config.access_password ? '待认证' : '免密'}，当前连接数 ${wss.clients.size}）`)
 
   ws.on('message', async (raw) => {
     let msgObj
     try {
       msgObj = JSON.parse(raw.toString())
     } catch {
+      logWarn(`收到无效 JSON ${ws.clientIp || '未知来源'}`)
       ws.send(JSON.stringify({ type: 'error', content: '无效的 JSON 格式' }))
       return
     }
@@ -584,6 +630,7 @@ wss.on('connection', (ws, req) => {
           await handleGetMedia(ws, msgObj)
           break
         default:
+          logWarn(`未知消息类型: ${String(msgObj.type).slice(0, 32)}`)
           ws.send(JSON.stringify({ type: 'error', content: '未知消息类型' }))
       }
     } catch (err) {
@@ -595,10 +642,13 @@ wss.on('connection', (ws, req) => {
   })
 
   ws.on('close', () => {
+    const wasActive = currentWs === ws
     clearCurrentWs(ws)
+    logInfo(`客户端断开 ${ws.clientIp || '未知来源'}（活跃连接${wasActive ? '已释放' : '未受影响'}，剩余 ${wss.clients.size}，持续 ${formatDuration(Date.now() - ws.connectedAt)}）`)
   })
 
   ws.on('error', () => {
+    logWarn(`连接异常 ${ws.clientIp || '未知来源'}`)
     clearCurrentWs(ws)
   })
 })
@@ -624,19 +674,21 @@ function requireActiveWs(ws) {
 
 async function handleAuth(ws, msgObj) {
   const password = config.access_password
+  const ip = ws.clientIp || '未知来源'
 
   if (!password) {
     ws.isAuthenticated = true
     setCurrentWs(ws)
+    logInfo(`认证通过 ${ip}（免密）`)
     ws.send(JSON.stringify({ type: 'auth', success: true }))
     return
   }
 
   if (!global.__authAttempts) global.__authAttempts = {}
-  const ip = ws.clientIp
   const now = Date.now()
   const entry = global.__authAttempts[ip]
   if (entry && entry.count >= 5 && now - entry.lastAttempt < 300000) {
+    logWarn(`认证被限流 ${ip}`)
     ws.send(JSON.stringify({ type: 'auth', success: false, message: '尝试次数过多，请5分钟后再试' }))
     return
   }
@@ -645,12 +697,14 @@ async function handleAuth(ws, msgObj) {
     ws.isAuthenticated = true
     setCurrentWs(ws)
     global.__authAttempts[ip] = { count: 0, lastAttempt: now }
+    logInfo(`认证通过 ${ip}`)
     ws.send(JSON.stringify({ type: 'auth', success: true }))
   } else {
     const attempt = global.__authAttempts[ip] || { count: 0 }
     attempt.count++
     attempt.lastAttempt = now
     global.__authAttempts[ip] = attempt
+    logWarn(`认证失败 ${ip}（剩余 ${5 - attempt.count} 次机会）`)
     ws.send(JSON.stringify({ type: 'auth', success: false, message: `密码错误，还剩 ${5 - attempt.count} 次机会` }))
   }
 }
@@ -688,6 +742,8 @@ async function handleLoadHistory(ws, msgObj) {
     if (limit > 0) messages = messages.slice(-limit)
 
     ws.send(JSON.stringify({ type: 'history', messages, hasMore }))
+    logInfo(`加载历史 ${userQQ}: 返回 ${messages.length} 条${hasMore ? '（还有更早的）' : ''}${before ? ' [增量]' : ''}`)
+    logDebug(`历史详情 ${userQQ}: Redis ${data.length} 条，before=${before || '-'}，limit=${limit || '全量'}`)
   } catch (err) {
     Bot.makeLog('error', `加载历史失败: ${err.message}`, 'sf-web-adapter', true)
     ws.send(JSON.stringify({ type: 'error', content: '加载历史失败' }))
@@ -700,16 +756,19 @@ async function handleGetMedia(ws, msgObj) {
   const id = typeof msgObj.id === 'string' ? msgObj.id : ''
 
   if (!MEDIA_ID_PATTERN.test(id)) {
+    logDebug(`取媒体 ${userQQ}/${id || '(空)'}: id 非法`)
     ws.send(JSON.stringify({ type: 'mediaMissing', id }))
     return
   }
 
   const media = await readMediaById(userQQ, id)
   if (!media) {
+    logDebug(`取媒体 ${userQQ}/${id}: 文件缺失或已清理`)
     ws.send(JSON.stringify({ type: 'mediaMissing', id }))
     return
   }
 
+  logDebug(`取媒体 ${userQQ}/${id}: 命中 ${media.mime} / ${media.buffer.length} 字节`)
   ws.send(JSON.stringify({
     type: 'media',
     id,
@@ -729,17 +788,22 @@ async function handleMessage(ws, msgObj) {
   for (const image of images) {
     const normalized = normalizeImagePayload(image)
     if (!normalized) {
+      logWarn(`消息被拒 ${userQQ}: 图片数据格式无效`)
       ws.send(JSON.stringify({ type: 'error', content: '图片数据格式无效' }))
       return
     }
     if (normalized.size > maxImageSize) {
+      logWarn(`消息被拒 ${userQQ}: 图片 ${formatSize(normalized.size)} 超过上限 ${formatSize(maxImageSize)}`)
       ws.send(JSON.stringify({ type: 'error', content: `图片过大，最大允许 ${formatSize(maxImageSize)}` }))
       return
     }
     normalizedImages.push(normalized)
   }
 
-  if (!content.trim() && normalizedImages.length === 0) return
+  if (!content.trim() && normalizedImages.length === 0) {
+    logDebug(`忽略空消息 ${userQQ}`)
+    return
+  }
 
   const rawMsg = buildRawMessage(content, normalizedImages.length)
   const key = `sf_web_adapter:history:${userQQ}`
@@ -810,6 +874,8 @@ async function handleMessage(ws, msgObj) {
   Bot[botId].fl.set(data.user_id, data.sender)
   cacheMessage(botId, data)
   Bot.em('message.private', data)
+  logInfo(`收到消息 ${userQQ}: ${content.length} 字 / ${normalizedImages.length} 张图（${data.message_id}）`)
+  logDebug(`已注入 Yunzai ${userQQ}: ${data.message.length} 个 segment，历史 ${entry.id}，落盘媒体 ${medias.length} 个`)
 }
 
 // 两处入口（WebSocket clearHistory / #web清空记录）共用同一套清空动作
@@ -830,6 +896,7 @@ async function handleClearHistory(ws, msgObj) {
   const userQQ = normalizeUserQQ(msgObj.userQQ)
   await clearUserHistory(userQQ)
   notifyHistoryCleared()
+  logInfo(`清空对话记录 ${userQQ}（来源: Web 按钮）`)
 }
 
 // ---- 适配器注册 ----
@@ -1009,11 +1076,13 @@ export const adapter = new class SFWebAdapter {
     }
 
     const targetWs = currentWs
-    if (targetWs?.isAuthenticated && targetWs.readyState === WebSocket.OPEN) {
+    const delivered = !!(targetWs?.isAuthenticated && targetWs.readyState === WebSocket.OPEN)
+    if (delivered) {
       targetWs.send(JSON.stringify({ content }))
     }
 
-    if (!shouldSkipNextHistory(fullUserId)) {
+    const savedToHistory = !shouldSkipNextHistory(fullUserId)
+    if (savedToHistory) {
       const key = `sf_web_adapter:history:${userQQ}`
       const entry = {
         id: buildHistoryId(),
@@ -1028,6 +1097,8 @@ export const adapter = new class SFWebAdapter {
 
     sweepMediaStorage().catch(() => {})
 
+    logInfo(`回复 ${userQQ}: ${segments.length} 段 / ${content.length} 字 / ${medias.length} 个媒体，${delivered ? '已推送页面' : '页面未连接（仅存历史）'}${savedToHistory ? '' : '，回执未入历史'}`)
+    logDebug(`回复详情 ${userQQ}: 历史 ${savedToHistory ? '已写入' : '跳过'}，媒体 ${medias.map(item => item.id).join(', ') || '无'}`)
     return { time: Date.now() }
   }
 

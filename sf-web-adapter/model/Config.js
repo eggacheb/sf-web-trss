@@ -14,6 +14,7 @@ export const { config, configSave } = await makeConfig("SFWebAdapter", {
   // 历史媒体配置（图片/语音落盘，后端作为唯一数据源）
   media_retention_days: 14,
   media_max_size_mb: 500,
+  // 打开后额外输出 getMedia / 落盘 / 历史游标等高频细节日志
   debug: false,
 }, {
   tips: [

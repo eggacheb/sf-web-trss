@@ -1,6 +1,9 @@
 import plugin from '../../../lib/plugins/plugin.js'
 import { config } from '../model/Config.js'
 
+// 与 index.js 共用同一个日志出口，保证前缀和级别一致
+const logInfo = (message) => globalThis.sfWebAdapter?.logInfo?.(message)
+
 export class WebManagement extends plugin {
   constructor() {
     super({
@@ -16,6 +19,7 @@ export class WebManagement extends plugin {
   }
 
   async status() {
+    logInfo(`收到 #web状态 查询（${this.e.user_id}）`)
     const version = globalThis.sfWebAdapter?.version || '未知'
     const stats = globalThis.sfWebAdapter?.getSendStats?.()
     const msg = [
@@ -34,6 +38,7 @@ export class WebManagement extends plugin {
   }
 
   async restart() {
+    logInfo(`收到 #web重启 指令（${this.e.user_id}）`)
     await this.e.reply('正在重启 Web 服务...')
     const restartWebServer = globalThis.sfWebAdapter?.restartWebServer
     if (typeof restartWebServer !== 'function') {
@@ -43,16 +48,17 @@ export class WebManagement extends plugin {
 
     try {
       const result = await restartWebServer()
-      Bot.makeLog('info', `Web 适配器重启完成: ${result.url}`, 'sf-web-adapter', true)
+      logInfo(`重启完成: ${result.url}`)
       await this.e.reply('✅ Web 服务已重启')
     } catch (err) {
-      Bot.makeLog('error', `Web 适配器重启失败: ${err.message}`, 'sf-web-adapter', true)
+      Bot.makeLog('error', `[Web] 重启失败: ${err.message}`, 'sf-web-adapter', true)
       await this.e.reply('❌ 重启失败: ' + err.message)
     }
   }
 
   async clearHistory() {
     const userQQ = this.e.user_id.replace(/^web_/, '')
+    logInfo(`收到 #web清空记录 指令（${this.e.user_id}）`)
     try {
       const clearUserHistory = globalThis.sfWebAdapter?.clearUserHistory
       if (typeof clearUserHistory !== 'function') {
@@ -72,8 +78,10 @@ export class WebManagement extends plugin {
           globalThis.sfWebAdapterSkipHistoryKeys.add(this.e.user_id)
         }
       }
+      logInfo(`清空对话记录 ${userQQ}（来源: #web清空记录）`)
       await this.e.reply('✅ 历史记录已清空')
     } catch (err) {
+      Bot.makeLog('error', `[Web] 清空失败: ${err.message}`, 'sf-web-adapter', true)
       await this.e.reply('❌ 清空失败: ' + err.message)
     }
   }
