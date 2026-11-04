@@ -20,6 +20,9 @@ const MESSAGE_CACHE_TTL = 5 * 60 * 1000
 const MESSAGE_CACHE_LIMIT = 2
 const OUTBOUND_MEDIA_LIMIT = 50 * 1024 * 1024
 
+// 历史条目里的媒体只存引用，前端按 id 通过 getMedia 拉取，Redis 不存 base64
+const MEDIA_REF_PREFIX = 'media:'
+
 // 未单独处理的 segment 用占位符表示，避免把内部 JSON 结构直接显示给用户
 const SEGMENT_PLACEHOLDERS = {
   video: '[视频]',
@@ -150,12 +153,15 @@ function buildRawMessage(content, imageCount = 0) {
 function normalizeImagePayload(image) {
   if (typeof image !== 'string') return null
 
+  const mimeMatch = image.match(/^data:(image\/[\w.+-]+);base64,/i)
+  const mime = mimeMatch ? mimeMatch[1].toLowerCase() : 'image/jpeg'
   const raw = image.replace(/^data:image\/[\w.+-]+;base64,/i, '').replace(/\s+/g, '')
   if (!isValidBase64(raw)) return null
 
   return {
     raw,
     size: getBase64Size(raw),
+    mime,
   }
 }
 
@@ -249,25 +255,47 @@ function buildMediaId(buffer, ext) {
   return `${hash}.${ext}`
 }
 
+const mediaWrites = new Map()
+
 async function saveMedia(userQQ, buffer, ext, mime, kind) {
   if (!buffer?.length) return null
   const safeExt = resolveMediaExt(ext, mime, kind)
   const id = buildMediaId(buffer, safeExt)
   const dir = getMediaDir(userQQ)
   const filePath = path.join(dir, id)
+  const meta = {
+    id,
+    kind,
+    mime: mime || (kind === 'record' ? getAudioMime(`.${safeExt}`) : getImageMime(`.${safeExt}`)),
+    size: buffer.length,
+  }
 
-  try {
+  // 同一张图会被多条消息同时引用（例如上行图片和机器人回图）。两个 writeFile
+  // 并发打开同一路径在 Windows 上会 EPERM，这里把同一目标的写入合并成一个任务。
+  const pending = mediaWrites.get(filePath)
+  if (pending) {
+    try {
+      await pending
+      return meta
+    } catch {
+      return null
+    }
+  }
+
+  const task = (async () => {
     await fs.promises.mkdir(dir, { recursive: true })
     await fs.promises.writeFile(filePath, buffer)
-    return {
-      id,
-      kind,
-      mime: mime || (kind === 'record' ? getAudioMime(`.${safeExt}`) : getImageMime(`.${safeExt}`)),
-      size: buffer.length,
-    }
+  })()
+  mediaWrites.set(filePath, task)
+
+  try {
+    await task
+    return meta
   } catch (err) {
     Bot.makeLog('warn', `媒体落盘失败: ${err.message}`, 'sf-web-adapter', true)
     return null
+  } finally {
+    mediaWrites.delete(filePath)
   }
 }
 
@@ -422,25 +450,16 @@ function shouldSkipNextHistory(userId) {
   return skipHistoryKeys.delete(String(userId))
 }
 
-function toHistoryContent(content) {
-  const raw = String(content)
-  const hasAudio = /<audio\b/i.test(raw)
-  const hasImage = /!\[.*?\]\(.*?\)|<img\b/i.test(raw)
-  const plain = raw
-    .replace(/<audio\b[\s\S]*?<\/audio>/gi, ' [语音] ')
-    .replace(/<audio\b[^>]*>/gi, ' [语音] ')
-    .replace(/<img\b[^>]*>/gi, ' [图片] ')
-    .replace(/!\[.*?\]\(.*?\)/g, ' [图片] ')
-    .replace(/<[^>]+>/g, '')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/[ \t]*\n[ \t]*/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+function buildHistoryId() {
+  return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
 
-  if (plain) return plain
-  if (hasImage) return '[图片]'
-  if (hasAudio) return '[语音]'
-  return '[消息]'
+function buildStoredImageRef(id) {
+  return `![图片](${MEDIA_REF_PREFIX}${id})`
+}
+
+function buildStoredAudioRef(id) {
+  return `<audio controls src="${MEDIA_REF_PREFIX}${id}"></audio>`
 }
 
 function closeWebSocketClients() {
@@ -529,6 +548,8 @@ globalThis.sfWebAdapter = {
   startWebServer,
   stopWebServer,
   skipNextHistory,
+  clearUserHistory,
+  notifyHistoryCleared,
 }
 
 wss.on('connection', (ws, req) => {
@@ -640,7 +661,7 @@ async function handleLoadHistory(ws, msgObj) {
   const key = `sf_web_adapter:history:${userQQ}`
   try {
     const data = await redis.lRange(key, 0, -1)
-    const messages = []
+    let messages = []
     for (const item of data) {
       try {
         const parsed = JSON.parse(item)
@@ -651,7 +672,22 @@ async function handleLoadHistory(ws, msgObj) {
         Bot.makeLog('warn', `跳过损坏的历史记录: ${err.message}`, 'sf-web-adapter', true)
       }
     }
-    ws.send(JSON.stringify({ type: 'history', messages }))
+
+    // before 是消息 id，只返回它之前的消息；limit 为 0 时返回全量（受 history_max 约束）
+    const before = typeof msgObj.before === 'string' ? msgObj.before : ''
+    if (before) {
+      const index = messages.findIndex(item => item.id === before)
+      if (index >= 0) messages = messages.slice(0, index)
+    }
+
+    const requestedLimit = Number(msgObj.limit)
+    const limit = Number.isInteger(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, 1000)
+      : 0
+    const hasMore = limit > 0 && messages.length > limit
+    if (limit > 0) messages = messages.slice(-limit)
+
+    ws.send(JSON.stringify({ type: 'history', messages, hasMore }))
   } catch (err) {
     Bot.makeLog('error', `加载历史失败: ${err.message}`, 'sf-web-adapter', true)
     ws.send(JSON.stringify({ type: 'error', content: '加载历史失败' }))
@@ -700,14 +736,43 @@ async function handleMessage(ws, msgObj) {
       ws.send(JSON.stringify({ type: 'error', content: `图片过大，最大允许 ${formatSize(maxImageSize)}` }))
       return
     }
-    normalizedImages.push(normalized.raw)
+    normalizedImages.push(normalized)
   }
 
   if (!content.trim() && normalizedImages.length === 0) return
 
   const rawMsg = buildRawMessage(content, normalizedImages.length)
   const key = `sf_web_adapter:history:${userQQ}`
-  await redis.rPush(key, JSON.stringify({ role: 'user', content: rawMsg, timestamp: Date.now() }))
+
+  // 用户上传的图片也落盘：历史是后端唯一数据源，前端清了缓存也要能取回
+  const storedParts = []
+  const medias = []
+  const text = content.trim()
+  if (text) storedParts.push(text)
+  for (let i = 0; i < normalizedImages.length; i++) {
+    const image = normalizedImages[i]
+    try {
+      const buffer = Buffer.from(image.raw, 'base64')
+      const stored = await saveMedia(userQQ, buffer, '', image.mime, 'image')
+      if (stored) {
+        medias.push({ kind: 'image', id: stored.id, mime: stored.mime, pos: i })
+        storedParts.push(buildStoredImageRef(stored.id))
+        continue
+      }
+    } catch (err) {
+      Bot.makeLog('warn', `用户图片落盘失败: ${err.message}`, 'sf-web-adapter', true)
+    }
+    storedParts.push('[图片]')
+  }
+
+  const entry = {
+    id: buildHistoryId(),
+    role: 'user',
+    content: storedParts.join(' ') || '[图片]',
+    timestamp: Date.now(),
+  }
+  if (medias.length) entry.medias = medias
+  await redis.rPush(key, JSON.stringify(entry))
   await redis.lTrim(key, -getHistoryLimit(), -1)
 
   const data = {
@@ -729,7 +794,7 @@ async function handleMessage(ws, msgObj) {
     data.message.push({ type: 'text', text: content })
   }
 
-  const imageUrls = normalizedImages.map(raw => `base64://${raw}`)
+  const imageUrls = normalizedImages.map(image => `base64://${image.raw}`)
   for (const file of imageUrls) {
     data.message.push({ type: 'image', file })
   }
@@ -747,12 +812,24 @@ async function handleMessage(ws, msgObj) {
   Bot.em('message.private', data)
 }
 
+// 两处入口（WebSocket clearHistory / #web清空记录）共用同一套清空动作
+async function clearUserHistory(userQQ) {
+  await redis.del(`sf_web_adapter:history:${userQQ}`)
+  await removeUserMedia(userQQ)
+}
+
+function notifyHistoryCleared() {
+  const ws = currentWs
+  if (ws?.isAuthenticated && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'historyCleared' }))
+  }
+}
+
 async function handleClearHistory(ws, msgObj) {
   if (!requireActiveWs(ws)) return
   const userQQ = normalizeUserQQ(msgObj.userQQ)
-  await redis.del(`sf_web_adapter:history:${userQQ}`)
-  await removeUserMedia(userQQ)
-  ws.send(JSON.stringify({ type: 'historyCleared' }))
+  await clearUserHistory(userQQ)
+  notifyHistoryCleared()
 }
 
 // ---- 适配器注册 ----
@@ -824,12 +901,24 @@ export const adapter = new class SFWebAdapter {
   }
 
   async sendFriendMsg(data, msg) {
+    // content 是推给当前页面的实时内容（带 base64）；storedContent 是写进 Redis 的版本，
+    // 媒体换成 media:<id> 引用。两者在同一个循环里同步生成，不会出现按位置猜媒体的错位。
     let content = ''
+    let storedContent = ''
     let lastWasText = false
     let mediaPos = 0
     const medias = []
     const fullUserId = typeof data.user_id === 'string' ? data.user_id : 'web_user'
     const userQQ = normalizeUserQQ(fullUserId.replace(/^web_/, ''))
+
+    const appendText = (text) => {
+      // Yunzai 常把长文本按行拆成多个 text 段传进来。首尾直接相接会把整段黏成
+      // 一行，markdown 的标题、引用、表格、代码围栏全部失效，这里补回换行。
+      const separator = lastWasText && content && !content.endsWith('\n') ? '\n' : ''
+      content += separator + text
+      storedContent += separator + text
+      if (text) lastWasText = true
+    }
 
     const segments = normalizeSendSegments(msg)
     for (let i = 0; i < segments.length; i++) {
@@ -837,12 +926,7 @@ export const adapter = new class SFWebAdapter {
       if (seg.type !== 'text') lastWasText = false
       if (seg.type === 'text') {
         if (seg.text !== undefined && seg.text !== null) {
-          const text = String(seg.text)
-          // Yunzai 常把长文本按行拆成多个 text 段传进来。首尾直接相接会把整段黏成
-          // 一行，markdown 的标题、引用、表格、代码围栏全部失效，这里补回换行。
-          if (lastWasText && content && !content.endsWith('\n')) content += '\n'
-          content += text
-          if (text) lastWasText = true
+          appendText(String(seg.text))
         }
       } else if (seg.type === 'image') {
         const pos = mediaPos++
@@ -850,16 +934,23 @@ export const adapter = new class SFWebAdapter {
           const media = await readMediaSource(seg.file || seg.url, '.jpg')
           if (!media?.buffer) {
             content += '\n[图片]'
+            storedContent += '\n[图片]'
             continue
           }
           const mime = media.mime?.startsWith('image/') ? media.mime : getImageMime(media.ext)
           const stored = await saveMedia(userQQ, media.buffer, media.ext, mime, 'image')
-          if (stored) medias.push({ kind: 'image', id: stored.id, mime: stored.mime, pos })
           const base64 = media.buffer.toString('base64')
           content += `\n![图片](data:${mime};base64,${base64})`
+          if (stored) {
+            medias.push({ kind: 'image', id: stored.id, mime: stored.mime, pos })
+            storedContent += `\n${buildStoredImageRef(stored.id)}`
+          } else {
+            storedContent += '\n[图片]'
+          }
         } catch (err) {
           Bot.makeLog('warn', `图片消息转换失败: ${sanitizeMediaLogText(err.message)}`, 'sf-web-adapter', true)
           content += '\n[图片]'
+          storedContent += '\n[图片]'
         }
       } else if (seg.type === 'record') {
         const pos = mediaPos++
@@ -867,26 +958,38 @@ export const adapter = new class SFWebAdapter {
           const media = await readMediaSource(seg.file || seg.url, '.mp3')
           if (!media?.buffer) {
             content += '\n[语音]'
+            storedContent += '\n[语音]'
             continue
           }
           const mime = media.mime?.startsWith('audio/') ? media.mime : getAudioMime(media.ext)
           const stored = await saveMedia(userQQ, media.buffer, media.ext, mime, 'record')
-          if (stored) medias.push({ kind: 'record', id: stored.id, mime: stored.mime, pos })
           const base64 = media.buffer.toString('base64')
           content += `\n<audio controls src="data:${mime};base64,${base64}"></audio>`
+          if (stored) {
+            medias.push({ kind: 'record', id: stored.id, mime: stored.mime, pos })
+            storedContent += `\n${buildStoredAudioRef(stored.id)}`
+          } else {
+            storedContent += '\n[语音]'
+          }
         } catch (err) {
           Bot.makeLog('warn', `语音消息转换失败: ${sanitizeMediaLogText(err.message)}`, 'sf-web-adapter', true)
           content += '\n[语音]'
+          storedContent += '\n[语音]'
         }
       } else if (seg.type !== 'at' && seg.type !== 'reply' && seg.type !== 'button') {
         const label = SEGMENT_PLACEHOLDERS[seg.type]
         const text = label || (seg.text ? String(seg.text) : `[${seg.type}]`)
         if (BLOCK_SEGMENTS.has(seg.type)) {
-          if (content && !content.endsWith('\n')) content += '\n'
-          content += text
-          if (i < segments.length - 1) content += '\n'
+          const separator = content && !content.endsWith('\n') ? '\n' : ''
+          content += separator + text
+          storedContent += separator + text
+          if (i < segments.length - 1) {
+            content += '\n'
+            storedContent += '\n'
+          }
         } else {
           content += text
+          storedContent += text
         }
       }
     }
@@ -911,9 +1014,13 @@ export const adapter = new class SFWebAdapter {
     }
 
     if (!shouldSkipNextHistory(fullUserId)) {
-      const plainContent = toHistoryContent(content)
       const key = `sf_web_adapter:history:${userQQ}`
-      const entry = { role: 'bot', content: plainContent, timestamp: Date.now() }
+      const entry = {
+        id: buildHistoryId(),
+        role: 'bot',
+        content: storedContent,
+        timestamp: Date.now(),
+      }
       if (medias.length) entry.medias = medias
       await redis.rPush(key, JSON.stringify(entry))
       await redis.lTrim(key, -getHistoryLimit(), -1)

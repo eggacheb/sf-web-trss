@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "test": "node --test sf-web-adapter/test/history-protocol.test.mjs sf-web-adapter/test/frontend-contract.test.mjs",
+    "check": "node --check sf-web-adapter/index.js && node --check sf-web-adapter/apps/WebManagement.js && node --check sf-web-adapter/model/Config.js && node --check sf-web-adapter/model/path.js && node --check sf-web-adapter/model/Media.js"
+  },
   "dependencies": {
     "ws": "^8.21.0"
   }

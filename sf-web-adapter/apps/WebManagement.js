@@ -54,7 +54,15 @@ export class WebManagement extends plugin {
   async clearHistory() {
     const userQQ = this.e.user_id.replace(/^web_/, '')
     try {
-      await redis.del(`sf_web_adapter:history:${userQQ}`)
+      const clearUserHistory = globalThis.sfWebAdapter?.clearUserHistory
+      if (typeof clearUserHistory !== 'function') {
+        await this.e.reply('❌ 清空失败: Web 适配器未就绪')
+        return
+      }
+      // 与前端「清空对话记录」共用同一套动作，Redis 和媒体目录一起删
+      await clearUserHistory(userQQ)
+      // 走指令清空时也要让当前页面同步清掉，否则页面还留着已被删除的历史
+      globalThis.sfWebAdapter.notifyHistoryCleared?.()
       if (this.e.user_id.startsWith('web_')) {
         const skipNextHistory = globalThis.sfWebAdapter?.skipNextHistory
         if (typeof skipNextHistory === 'function') {

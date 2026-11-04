@@ -10,7 +10,7 @@
 - 启动 WebSocket 服务，默认监听 `0.0.0.0:8082`。
 - 接收浏览器文本和图片消息，并转换为 `message.private` 事件。
 - 支持机器人回复文本、图片、语音到 Web 前端。
-- 使用 Redis 保存每个 Web 用户的对话历史。
+- 使用 Redis 保存每个 Web 用户的完整对话历史（原文 + 媒体引用），前端不保存聊天记录。
 - 支持访问密码、历史条数、图片大小、输入状态等配置。
 - 提供 `#web状态`、`#web重启`、`#web清空记录` 管理命令。
 
@@ -114,11 +114,27 @@ ws://<host>:<ws_port>
 { "type": "auth", "success": true }
 ```
 
-加载历史：
+加载历史（后端是唯一数据源）：
 
 ```json
 { "type": "loadHistory", "userQQ": "123456" }
 ```
+
+可选增量参数：`before` 是某条消息的 `id`（只返回它之前的消息），`limit` 是最多返回条数；都不传则返回全部（受 `history_max` 约束）。
+
+`history` 里的每条消息：
+
+```json
+{
+  "id": "m_m1abc_xyz123",
+  "role": "bot",
+  "content": "收到 **好的**\n![图片](media:a1b2c3d4e5f6a7b8.png)",
+  "medias": [{ "kind": "image", "id": "a1b2c3d4e5f6a7b8.png", "mime": "image/png", "pos": 0 }],
+  "timestamp": 1730000000000
+}
+```
+
+`content` 保留原始 markdown 排版；图片和语音只写成 `media:<id>` 引用，**不把 base64 塞进 Redis**。前端先渲染成占位符，再按 `id` 用 `getMedia` 拉取并原地补回，不需要本地缓存，也不用按内容猜哪张图属于哪条消息。
 
 发送消息：
 
@@ -131,21 +147,27 @@ ws://<host>:<ws_port>
 }
 ```
 
-清空历史：
+用户上传的图片同样落盘并写入 `medias`，历史里也能完整还原。
+
+清空服务端的对话记录（删 Redis 历史和该用户的媒体文件，并广播 `historyCleared`）：
 
 ```json
 { "type": "clearHistory", "userQQ": "123456" }
 ```
 
+前端「清空页面」只清当前显示，**不发这条消息**；重新连接即可从后端恢复历史。要真正删记录请用前端的「清空对话记录」按钮或 `#web清空记录`。
+
 服务端返回的常见消息：
 
-- `{ "type": "history", "messages": [...] }`
+- `{ "type": "history", "messages": [...], "hasMore": false }`
 - `{ "type": "historyCleared" }`
 - `{ "type": "typing", "active": true }`
-- `{ "content": "机器人回复内容" }`
+- `{ "content": "机器人回复内容" }`（实时消息，媒体是完整 data URL）
+- `{ "type": "media", "id": "...", "mime": "...", "dataUrl": "..." }`
+- `{ "type": "mediaMissing", "id": "..." }`
 - `{ "type": "error", "content": "错误原因" }`
 
-拉取历史消息里的媒体（前端本地缓存未命中时）：
+拉取历史消息里的媒体：
 
 ```json
 { "type": "getMedia", "userQQ": "123456", "id": "a1b2c3d4e5f6a7b8.jpg" }
@@ -161,17 +183,18 @@ ws://<host>:<ws_port>
 
 ## 媒体持久化
 
-图片和语音在转发的同时会落盘，供前端离线后重新打开时回看：
+图片和语音在转发的同时会落盘，**后端是唯一数据源**，换个浏览器或清掉浏览器缓存也能完整还原历史：
 
 ```text
 plugins/sf-web-adapter/data/media/<userQQ>/<内容哈希前16位>.<ext>
 ```
 
-- 同一张图重复发送只存一份（按内容哈希去重）
-- 历史记录只保存媒体引用 `{ kind, id, mime, pos }`，不存 base64，避免撑爆 Redis
-- 前端加载历史后按 `id` 通过 `getMedia` 拉取，拿到 `dataUrl` 后渲染并写入自己的 IndexedDB
-- `pos` 是该媒体在本条消息里的第几个占位符（从 0 开始），个别媒体缺失时前端不会错位填充
-- 清理有两个来源：`#web清空记录` 或前端「清空页面」会立即删除该用户的整个媒体目录；此外按 `media_retention_days`、`media_max_size_mb` 每小时兜底清理一次
+- 上行（用户发送）和下行（机器人回复）的图片/语音都会落盘；同一张图重复发送只存一份（按内容哈希去重）
+- 同一文件的并发写入会合并，避免 Windows 上两个 `writeFile` 撞出 `EPERM`
+- 历史条目只保存 `media:<id>` 引用和 `medias` 元数据，不存 base64，避免撑爆 Redis
+- 前端加载历史后立即显示文本与占位符，再按 `id` 通过 `getMedia` 拉取并原地补回，媒体取不到不会阻塞整页
+- `pos` 标明该媒体是这条消息里的第几个媒体（从 0 起），用于兼容按顺序注入的客户端
+- 清理有两个来源：`#web清空记录` 或前端「清空对话记录」会立即删除该用户的整个媒体目录；此外按 `media_retention_days`、`media_max_size_mb` 每小时兜底清理一次
 - `data/` 已在 `.gitignore` 中排除，不会进版本库
 
 同一时间只有最后一个认证成功的 WebSocket 会话可以注入消息和修改历史。旧连接如果继续发送消息，会收到“当前连接已被新的 Web 会话接管”的错误。
@@ -193,11 +216,20 @@ plugins/sf-web-adapter/data/media/<userQQ>/<内容哈希前16位>.<ext>
 | --- | --- | --- |
 | `#web状态` | 所有人 | 查看端口、连接状态和命令列表 |
 | `#web重启` | master | 重启 WebSocket 服务 |
-| `#web清空记录` | 当前会话 | 清空当前 Web 用户的 Redis 历史记录 |
+| `#web清空记录` | 当前会话 | 清空服务端对话历史与媒体文件，并广播 `historyCleared` |
 
 ## 开发检查
 
-提交前至少运行语法检查：
+提交前至少运行语法检查，以及在仓库根目录跑协议测试：
+
+```bash
+npm test
+npm run check
+```
+
+`sf-web-adapter/test/` 下的测试会在临时目录搭一套最小 Yunzai 运行时，加载真实插件源码并起 WebSocket 服务，从协议层断言 `loadHistory` / `getMedia` / `clearHistory` 的行为；同时检查独立前端仓库的静态契约和发版版本号。
+
+也可以逐个文件手动检查：
 
 ```bash
 node --check index.js

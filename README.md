@@ -17,6 +17,8 @@ TRSS-Yunzai 内核 → 各功能插件
         │  e.reply() → adapter.sendFriendMsg()
         ▼
 WebSocket 推回前端（文本 / base64 图片 / base64 语音）
+        │
+        └─→ Redis 存完整历史，data/media/ 存媒体；重连时由后端统一同步回来
 ```
 
 插件只做「浏览器 ↔ Yunzai」的桥接，不托管页面。前端是独立的纯静态站点，可以单独部署、单独更新。
@@ -72,7 +74,7 @@ your-bot-domain.com:8082
 |---|---|---|
 | `#web状态` | 所有人 | 查看端口、连接状态 |
 | `#web重启` | master | 重启 WebSocket 服务 |
-| `#web清空记录` | 当前会话 | 清空该 Web 用户的 Redis 历史 |
+| `#web清空记录` | 当前会话 | 清空服务端对话历史与媒体文件 |
 
 ## 配置
 
@@ -91,11 +93,13 @@ your-bot-domain.com:8082
 
 改完端口或密码后执行 `#web重启`，或者重启 Yunzai。
 
-### 关于离线消息
+### 关于历史消息
 
-机器人主动推送的图片和语音会落盘到 `sf-web-adapter/data/media/<userQQ>/`，历史记录里只存引用。前端打开时先从本地 IndexedDB 取，取不到再按 `id` 通过 WebSocket 向插件拉取 —— **所以就算你几小时后才打开网页，图片和语音依然在**。
+**后端是唯一数据源，浏览器不保存聊天记录。** 用户发的和机器人回的图片语音都会落盘到 `sf-web-adapter/data/media/<userQQ>/`，Redis 里存完整 markdown 原文加 `media:<id>` 引用（不存 base64）。前端连接后先一次拉回全部历史并立即显示文本，再按 `id` 通过 WebSocket 把媒体异步补齐 —— 换浏览器、无痕窗口、清掉浏览器站点数据，历史都还在。
 
-清理是双保险：结束对话（`#web清空记录` 或前端「清空页面」）会立刻删掉该用户的媒体目录；即使一直不清，超过 `media_retention_days` 天或总量超过 `media_max_size_mb` 也会自动清理最旧的文件。
+两个清空操作别搞混：「清空页面」只清当前屏幕上的显示，后端历史保留，重新连接就恢复；「清空对话记录」才真的删服务端历史和媒体文件，不可撤销。
+
+清理是双保险：清空对话记录（或 `#web清空记录`）会立刻删掉该用户的媒体目录；即使一直不清，超过 `media_retention_days` 天或总量超过 `media_max_size_mb` 也会自动清理最旧的文件。
 
 ## 目录结构
 
@@ -122,6 +126,13 @@ trsssf/
 | `siliconflow-plugin/` | 早期方案：构造虚拟 `e` 对象把对话塞进 WebSocket |
 
 ## 开发
+
+```bash
+npm test     # 协议测试 + 前端静态契约测试
+npm run check   # 逐个文件语法检查
+```
+
+`npm test` 会在临时目录搭一套最小 Yunzai 运行时，加载真实插件并起 WebSocket 服务，从协议层验证历史同步行为。手动检查也可以：
 
 ```bash
 node --check sf-web-adapter/index.js

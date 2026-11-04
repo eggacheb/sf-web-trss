@@ -110,7 +110,7 @@ WebSocket 推回前端（文本 / base64 图片 / base64 语音）
 7. 图片全程 base64 内存传输（收：base64 → Yunzai segment；发：读文件 → base64 → WebSocket），不落盘
 8. 被动接收语音：语音 `record` segment → 读文件 → base64 → `<audio>` 标签 → WebSocket → 前端自动渲染
 9. 消息历史持久化（Redis List，可配置上限）
-10. 清空历史记录：前端「清空页面」按钮联动清 Redis + Yunzai 指令 `#web清空记录`
+10. ~~清空历史记录：前端「清空页面」按钮联动清 Redis~~ → **已修订（2026-11-04）**：「清空页面」只清 DOM、保留服务端历史；另设「清空对话记录」按钮发 `clearHistory` 删 Redis + 媒体文件；`#web清空记录` 走同一个清空接口并广播 `historyCleared`。历史本身也改为后端唯一数据源，见下方「消息历史持久化」
 11. 配置系统（Yunzai makeConfig）
 12. 用户指令（状态查看、重启服务、清空记录）
 13. 锅巴 GUI 配置面板
@@ -126,7 +126,7 @@ WebSocket 推回前端（文本 / base64 图片 / base64 语音）
 - [x] 语音接收在前端显示为 HTML5 `<audio>` 播放器
 - [x] 消息历史在重新连接后可加载
 - [x] 消息历史上限可通过配置调整
-- [x] 前端「清空页面」按钮同时清空 Redis 历史记录
+- [x] ~~前端「清空页面」按钮同时清空 Redis 历史记录~~ → 已按 2026-11-04 修订撤销，见「清空历史」小节
 - [x] Yunzai 指令 `#web清空记录` 可清空 Redis 历史记录
 - [x] Yunzai 插件的回复正常推送到前端
 - [x] 配置项可通过锅巴面板修改
@@ -152,12 +152,14 @@ WebSocket 推回前端（文本 / base64 图片 / base64 语音）
 
 ## 图片处理策略
 
+> **2026-11-04 修订**：下面「不落盘 / Redis 只存占位符」属早期设计，现已改为图片落盘 + `media:<id>` 引用（见「消息历史持久化」）。实时链路仍是 base64 内存传输。
+
 完全参照 TRSS-WeChat-OC-Plugin 的做法，图片只在内存中以 base64 流动，不落盘：
 
 - **收图**：前端 WebSocket `images[]` (base64) → 插件构造 Yunzai segment `{ type: "image", file: "base64://xxx" }` → `Bot.em()` 发射。Yunzai 原生支持 `base64://` 前缀，功能插件直接识别。
 - **发图**：Yunzai 插件 `e.reply(segment.image("路径"))` → `sendFriendMsg()` 读文件 → 转 base64 → `![图片](data:image/...;base64,...)` → WebSocket 推送 → 前端 marked 渲染。
 - **缓存**：消息缓存（`_cacheMessage`）仅存 5 分钟 × 2 条，用于支持 `e.getReply()`，图片本身是 base64 字符串，不额外占磁盘。
-- **历史 Redis** 中图片记录为 `[图片]` 占位，不保留原图。
+- ~~**历史 Redis** 中图片记录为 `[图片]` 占位，不保留原图。~~ → 现改为图片落盘 + `![图片](media:<id>)` 引用
 
 ## 语音处理策略（被动接收）
 
@@ -169,17 +171,19 @@ WebSocket 推回前端（文本 / base64 图片 / base64 语音）
 - WebSocket 推送 → 前端 marked 渲染（marked 配置 `sanitize: false`，原生支持 HTML 标签不转义）
 - 前端无需任何额外代码，`<audio controls>` 自动渲染为 HTML5 播放器
 - **raw_message** 记录为 `[语音]` 占位
-- 历史 Redis 中语音记录为 `[语音]` 占位，不保留音频 base64
+- ~~历史 Redis 中语音记录为 `[语音]` 占位，不保留音频 base64~~ → 现改为语音落盘 + `<audio controls src="media:<id>">` 引用
 
 ## 消息历史持久化
 
+> **2026-11-04 修订：后端唯一数据源。** 原先「前端 IndexedDB 缓存媒体 + Redis 只存占位符」的设计，会让清掉浏览器缓存后历史残缺，「清空页面」还会误删后端历史。现在 Redis 存完整消息，浏览器不保存任何聊天记录。旧 Redis 数据已由使用者清空，不做兼容。
+
 ### 目标
 
-- 刷新页面后能恢复之前的对话
-- 重新连接 WebSocket 时一次性加载
+- 刷新页面、换浏览器、清浏览器站点数据后都能恢复完整对话（含图片语音与 markdown 排版）
+- 重新连接 WebSocket 时一次性从后端加载
 - 单人使用，按 userQQ 区分（用户可在设置面板切换 QQ）
-- 可通过配置调整历史消息上限
-- 可手动清空（前端按钮 + Yunzai 指令两种方式）
+- 可通过配置调整历史消息上限，或用 `before` / `limit` 增量拉取
+- 「清空页面」只清显示；「清空对话记录」和 Yunzai 指令才删服务端数据
 
 ### 存储方式
 
@@ -190,44 +194,42 @@ WebSocket 推回前端（文本 / base64 图片 / base64 语音）
 sf_web_adapter:history:{userQQ}
 ```
 
-例如 `sf_web_adapter:history:123456`
-
 **消息格式（List 中的每个元素）：**
 ```json
 {
-  "role": "user",
-  "content": "你好 [图片]",
-  "timestamp": 1718000000000
+  "id": "m_m1abc_xyz123",
+  "role": "bot",
+  "content": "收到 **好的**\n![图片](media:a1b2c3d4e5f6a7b8.png)",
+  "medias": [{ "kind": "image", "id": "a1b2c3d4e5f6a7b8.png", "mime": "image/png", "pos": 0 }],
+  "timestamp": 1730000000000
 }
 ```
+
+`content` 保留原文；媒体只写 `media:<id>` 引用，字节落在 `data/media/<userQQ>/`，Redis 不存 base64。
 
 ### 读写操作
 
 | 时机 | 操作 |
 |---|---|
-| 收到用户消息（含图片） | `content` 记录文本 + `[图片]` 占位 → `redis.rPush(key, JSON)` → `redis.lTrim(key, -max, -1)` |
-| `sendFriendMsg()` 发出回复 | `content` 记录纯文本（去掉 `<audio>` 等 HTML 标签）→ `redis.rPush(key, JSON)` → `redis.lTrim(key, -max, -1)` |
-| 前端请求 `loadHistory` | `redis.lRange(key, 0, -1)` → 解析 JSON → 返回前端 |
+| 收到用户消息（含图片） | 图片落盘 → `content` 记原文 + `media:<id>` → `redis.rPush` → `redis.lTrim` |
+| `sendFriendMsg()` 发出回复 | 实时 WS 推完整 data URL；Redis 副本用 `media:<id>`，同时落盘 → `redis.rPush` → `redis.lTrim` |
+| 前端请求 `loadHistory` | `redis.lRange` → 按 `before` / `limit` 裁剪 → 返回 `messages` + `hasMore` |
+| 前端补媒体 | `getMedia` 按 id 读盘 → `media` / `mediaMissing` |
 | 首次写入（Key 不存在） | `redis.rPush` 自动创建 |
+
+同一文件的并发落盘要合并：Windows 上两个 `writeFile` 撞同一路径会 `EPERM`。
 
 ### 清空历史
 
-两种方式，效果相同：
+两个前端按钮语义完全不同：
 
-| 方式 | 触发 | 后端操作 |
+| 按钮 / 指令 | 触发 | 后端操作 |
 |---|---|---|
-| 前端按钮 | 设置面板「清空页面」按钮 → `ws.send({ type: "clearHistory", userQQ })` | `redis.del("sf_web_adapter:history:{userQQ}")` → 回复 `{ type: "historyCleared" }` → 前端清 DOM |
-| Yunzai 指令 | QQ 发送 `#web清空记录` → `apps/WebManagement.js` 处理 | 取 `e.user_id` 去掉 `web_` 前缀 → `redis.del(key)` → `e.reply("历史记录已清空")` |
+| 「清空页面」 | 只清 DOM + 会话内存 | **无**，服务端历史保留，重新连接即恢复 |
+| 「清空对话记录」 | `ws.send({ type: "clearHistory", userQQ })` | `redis.del(key)` + 删 `data/media/<userQQ>/` → 广播 `historyCleared` |
+| `#web清空记录` | `apps/WebManagement.js` | 调同一个 `clearUserHistory()` → 广播 `historyCleared` → 回执（该回执不写进新历史） |
 
-前端按钮的完整流程：
-
-```
-1. 用户点击「清空页面」
-2. EventBinder 发送: { type: "clearHistory", userQQ: "123456" }
-3. 后端收到: redis.del("sf_web_adapter:history:123456")
-4. 后端回复: { type: "historyCleared" }
-5. 前端收到: MessageManager.clearMessages()  // 清 DOM
-```
+前端收到 `historyCleared` 才清 DOM；这样从 QQ 侧清空时，已经打开的网页也会同步。
 
 ### 上限控制
 
@@ -241,6 +243,8 @@ history_max: 100    // 每用户最多保留 100 条，可在 10-1000 范围配�
 ```
 
 ### raw_message 规则
+
+> 这里说的是注入 Yunzai 的 `raw_message`，仍用占位符；写进 Redis 的 `content` 已按 2026-11-04 修订保留原文 + `media:<id>` 引用，不再剥离。
 
 | 场景 | content |
 |---|---|
@@ -257,17 +261,20 @@ history_max: 100    // 每用户最多保留 100 条，可在 10-1000 范围配�
 | type | 字段 | 说明 |
 |---|---|---|
 | `auth` | `password` | 密码认证 |
-| `loadHistory` | `userQQ, timestamp` | 加载历史（去掉 mode） |
-| `message` | `content, timestamp, images[], userQQ` | 发送消息（固定 type） |
-| `clearHistory` | `userQQ` | 清空历史记录 |
+| `loadHistory` | `userQQ`, `before?`, `limit?` | 加载历史（可选增量游标，不再带 `timestamp`） |
+| `message` | `content`, `timestamp`, `images[]`, `userQQ` | 发送消息（固定 type） |
+| `clearHistory` | `userQQ` | 只由「清空对话记录」发送，删服务端历史与媒体 |
+| `getMedia` | `userQQ`, `id` | 按 id 拉取历史媒体 |
 
 插件 → 前端：
 
 | type | 字段 | 说明 |
 |---|---|---|
 | `auth` | `success` | 认证结果 |
-| `history` | `messages[{role,content}]` | 历史记录列表 |
-| `historyCleared` | — | 清空确认 |
+| `history` | `messages[{id,role,content,medias}]`, `hasMore` | 历史记录列表 |
+| `historyCleared` | — | 清空确认（按钮与 `#web清空记录` 都会广播） |
+| `media` / `mediaMissing` | `id`, `mime`, `dataUrl` | 媒体响应 |
+| `typing` | `active` | 输入状态 |
 | `error` | `content` | 错误信息 |
 | _(无 type)_ | `content` | 普通回复消息 |
 
@@ -279,8 +286,8 @@ history_max: 100    // 每用户最多保留 100 条，可在 10-1000 范围配�
 | `public/js/app.js` | 删除 `ModeManager` 整个模块 | 不需要模式循环 |
 | `public/js/app.js` | 删除 `AppState.currentMode` | 状态简化 |
 | `public/js/app.js` | `send()` 中固定 type 为 `message` | 不再使用 ss/gg/dd |
-| `public/js/app.js` | `loadHistory` 去掉 mode 字段 | 仅 userQQ + timestamp |
-| `public/js/app.js` | 「清空页面」按钮联动发 `clearHistory` 消息 | 原只清 DOM，现加 WebSocket 发送逻辑 |
+| `public/js/app.js` | `loadHistory` 去掉 mode 字段 | 仅 `userQQ`（可选 `before` / `limit`），不再带 `timestamp` |
+| `public/js/app.js` | ~~「清空页面」按钮联动发 `clearHistory` 消息~~ → 已撤销；现由独立的「清空对话记录」按钮发送 |
 | `public/js/app.js` | `handleMessage` 处理 `historyCleared` 响应 | 收到后清空 DOM 聊天区域 |
 | `public/css/main.css` | 删除 ss-mode/gg-mode/dd-mode 样式 | 不需要三种颜色 |
 | 设置面板 | `userQQ`、`botQQ` **保留** | 用于头像和 localStorage，服务端不改动 |
